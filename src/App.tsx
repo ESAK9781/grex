@@ -2,52 +2,60 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  BellRing,
   BookOpen,
   FileCode2,
-  GitBranch,
-  PanelLeft,
+  FolderGit2,
+  LayoutList,
   Plug,
-  Plus,
   Search,
-  Sparkles,
+  Settings,
   Terminal as TerminalIcon,
 } from "lucide-react";
 import type {
   AgentTab,
+  AppSettings,
   BootstrapState,
-  CreateTabRequest,
+  IssuePriority,
+  IssueStatus,
+  MainTab,
   PingEventPayload,
   ReviewItem,
 } from "./types";
-import { TerminalPane } from "./components/TerminalPane";
-import { ChangelogViewer } from "./components/ChangelogViewer";
-import { NewTabModal } from "./components/NewTabModal";
+import { DEFAULT_SHORTCUTS, matchesShortcut } from "./shortcuts";
+import { WorkspaceSetup } from "./components/WorkspaceSetup";
+import { BoardView } from "./components/BoardView";
+import { TerminalsView } from "./components/TerminalsView";
+import { ChangelogsView } from "./components/ChangelogsView";
 import { CentralConfigModal } from "./components/CentralConfigModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { McpManagerModal } from "./components/McpManagerModal";
+import { SettingsModal } from "./components/SettingsModal";
 
 export function App() {
   const [state, setState] = useState<BootstrapState | null>(null);
+  const [mainTab, setMainTab] = useState<MainTab>("board");
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [activeReviewId, setActiveReviewId] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [showNewTab, setShowNewTab] = useState(false);
+  const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
+  const [newIssueOpen, setNewIssueOpen] = useState(false);
   const [showCentral, setShowCentral] = useState(false);
   const [showMcps, setShowMcps] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 3800);
+    setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 3600);
   }, []);
 
   const refresh = useCallback(async () => {
     const data = await invoke<BootstrapState>("get_bootstrap_state");
     setState(data);
     setActiveTabId((cur) => {
-      if (cur && data.tabs.some((t) => t.id === cur)) return cur;
+      if (cur && data.tabs.some((t) => t.id === cur && t.state !== "Archived")) {
+        return cur;
+      }
       const firstActive = data.tabs.find((t) => t.state !== "Archived");
       return firstActive?.id ?? null;
     });
@@ -63,7 +71,7 @@ export function App() {
 
     listen<ReviewItem>("changelog-submitted", (ev) => {
       notify(
-        `Changelog queued: ${ev.payload.feature_id} (Iter #${ev.payload.iteration})`
+        `Changelog ready: ${ev.payload.feature_id} (Iter #${ev.payload.iteration})`
       );
       setActiveReviewId(ev.payload.id);
     }).then((fn) => unlisteners.push(fn));
@@ -79,45 +87,116 @@ export function App() {
     };
   }, [refresh, notify]);
 
+  const settings: AppSettings = state?.settings ?? {
+    default_cli: "claude",
+    default_permission: "default",
+    notify_on_inactive: true,
+    inactive_timeout_secs: 25,
+    shortcuts: DEFAULT_SHORTCUTS,
+    recent_workspaces: [],
+  };
+  const shortcuts = { ...DEFAULT_SHORTCUTS, ...settings.shortcuts };
   const activeTabs = (state?.tabs ?? []).filter((t) => t.state !== "Archived");
-  const activeTab = activeTabs.find((t) => t.id === activeTabId) ?? null;
   const reviews = state?.reviews ?? [];
   const pendingCount = reviews.filter((r) => r.status === "Pending").length;
-  const activeReview = reviews.find((r) => r.id === activeReviewId) ?? null;
+  const blockedCount = activeTabs.filter((t) => t.state === "Blocked").length;
+  const enabledMcpsCount = (state?.installed_mcps ?? []).filter(
+    (m) => m.enabled
+  ).length;
 
-  // Global developer efficiency keyboard shortcuts
+  const handleQuickSpawn = useCallback(async () => {
+    try {
+      const created = await invoke<AgentTab>("create_agent_tab", { req: {} });
+      await refresh();
+      setActiveTabId(created.id);
+      setMainTab("terminals");
+      notify(`Spawned ${created.cli} on ${created.branch_name}`);
+    } catch (err) {
+      notify(String(err));
+    }
+  }, [refresh, notify]);
+
+  // Configurable global keyboard shortcuts
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === "k") {
+      if (showSettings) return; // Don't hijack while recording shortcuts
+      if (matchesShortcut(e, shortcuts.command_palette)) {
         e.preventDefault();
         setShowPalette((v) => !v);
-      } else if (mod && e.key.toLowerCase() === "n") {
+      } else if (matchesShortcut(e, shortcuts.tab_board)) {
         e.preventDefault();
-        setShowNewTab(true);
-      } else if (mod && e.key.toLowerCase() === "b") {
+        setMainTab("board");
+      } else if (matchesShortcut(e, shortcuts.tab_terminals)) {
         e.preventDefault();
-        setSidebarOpen((v) => !v);
-      } else if (mod && e.key.toLowerCase() === "m") {
+        setMainTab("terminals");
+      } else if (matchesShortcut(e, shortcuts.tab_changelogs)) {
+        e.preventDefault();
+        setMainTab("changelogs");
+      } else if (matchesShortcut(e, shortcuts.new_issue)) {
+        e.preventDefault();
+        setMainTab("board");
+        setNewIssueOpen(true);
+      } else if (matchesShortcut(e, shortcuts.new_terminal)) {
+        e.preventDefault();
+        handleQuickSpawn();
+      } else if (matchesShortcut(e, shortcuts.open_mcps)) {
         e.preventDefault();
         setShowMcps((v) => !v);
-      } else if (mod && e.key >= "1" && e.key <= "9") {
-        const idx = Number(e.key) - 1;
-        if (activeTabs[idx]) {
-          e.preventDefault();
-          setActiveTabId(activeTabs[idx].id);
-        }
+      } else if (matchesShortcut(e, shortcuts.open_settings)) {
+        e.preventDefault();
+        setShowSettings((v) => !v);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeTabs]);
+  }, [shortcuts, showSettings, handleQuickSpawn]);
 
-  async function handleCreateTab(req: CreateTabRequest) {
-    const created = await invoke<AgentTab>("create_agent_tab", { req });
+  async function handleSaveSettings(next: AppSettings) {
+    await invoke("save_app_settings", { settings: next });
     await refresh();
-    setActiveTabId(created.id);
-    notify(`Spawned ${created.cli} in ${created.branch_name}`);
+    notify("Settings & shortcuts saved");
+  }
+
+  async function handleCreateIssue(
+    title: string,
+    spec: string,
+    priority: IssuePriority,
+    labels: string[]
+  ) {
+    await invoke("create_issue_cmd", {
+      req: { title, spec, priority, labels },
+    });
+    await refresh();
+    notify("Feature spec added to board");
+  }
+
+  async function handleUpdateIssue(
+    issueId: string,
+    patch: { status?: IssueStatus; comment?: string }
+  ) {
+    await invoke("update_issue_cmd", {
+      req: {
+        issue_id: issueId,
+        status: patch.status ?? null,
+        comment: patch.comment ?? null,
+        author: "operator",
+      },
+    });
+    await refresh();
+  }
+
+  async function handleDeleteIssue(issueId: string) {
+    await invoke("delete_issue_cmd", { issueId });
+    await refresh();
+    notify("Issue deleted");
+  }
+
+  async function handleSpawnForIssue(issueId: string) {
+    const tab = await invoke<AgentTab>("spawn_agent_for_issue", { issueId });
+    await refresh();
+    setActiveTabId(tab.id);
+    setMainTab("terminals");
+    notify(`Spawned ${tab.cli} on ${tab.branch_name}`);
   }
 
   async function handleCloseTab(tab: AgentTab) {
@@ -151,268 +230,189 @@ export function App() {
     const review = await invoke<ReviewItem>("submit_sample_changelog");
     await refresh();
     setActiveReviewId(review.id);
-    notify("Validated & queued 5-subtab sample changelog");
+    setMainTab("changelogs");
+    notify("Loaded 5-subtab sample changelog");
   }
 
-  function handleCopyMcp() {
-    const url = state?.mcp_url ?? "http://127.0.0.1:4739/mcp";
-    navigator.clipboard.writeText(url).then(() => notify(`Copied ${url}`));
+  // Session Workspace Gate: prompt once on startup unless launched with `grex ./`
+  if (state && (!state.workspace || switchingWorkspace)) {
+    return (
+      <WorkspaceSetup
+        settings={settings}
+        onWorkspaceReady={() => {
+          setSwitchingWorkspace(false);
+          refresh();
+        }}
+        onSaveSettings={handleSaveSettings}
+      />
+    );
   }
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar-left">
-          <button
-            className="btn btn-ghost"
-            style={{ padding: "0 6px" }}
-            onClick={() => setSidebarOpen((v) => !v)}
-            title="Toggle Sidebar (Ctrl+B)"
-          >
-            <PanelLeft size={15} />
-          </button>
           <div className="brand">
             <div className="brand-mark">GX</div>
             <span>Grex</span>
           </div>
-          <button
-            className="cmd-trigger"
-            onClick={() => setShowPalette(true)}
-            title="Command Palette (Ctrl+K)"
-          >
-            <Search size={13} />
-            <span>Quick jump...</span>
-            <kbd>Ctrl+K</kbd>
-          </button>
+
+          <nav className="main-tabs" aria-label="Primary sections">
+            <button
+              className={`main-tab ${mainTab === "board" ? "active" : ""}`}
+              onClick={() => setMainTab("board")}
+              title={`Board (${shortcuts.tab_board})`}
+            >
+              <LayoutList size={14} />
+              <span>Board</span>
+              <span className="tab-count">{state?.issues.length ?? 0}</span>
+            </button>
+            <button
+              className={`main-tab ${mainTab === "terminals" ? "active" : ""}`}
+              onClick={() => setMainTab("terminals")}
+              title={`Terminals (${shortcuts.tab_terminals})`}
+            >
+              <TerminalIcon size={14} />
+              <span>Terminals</span>
+              <span className={`tab-count ${blockedCount > 0 ? "danger" : ""}`}>
+                {activeTabs.length}
+              </span>
+            </button>
+            <button
+              className={`main-tab ${mainTab === "changelogs" ? "active" : ""}`}
+              onClick={() => setMainTab("changelogs")}
+              title={`Changelogs (${shortcuts.tab_changelogs})`}
+            >
+              <FileCode2 size={14} />
+              <span>Changelogs</span>
+              {pendingCount > 0 && (
+                <span className="tab-count alert">{pendingCount}</span>
+              )}
+            </button>
+          </nav>
         </div>
 
         <div className="topbar-actions">
+          {state?.workspace && (
+            <button
+              className="ws-pill"
+              onClick={() => setSwitchingWorkspace(true)}
+              title={`${state.workspace.path} — Click to switch workspace`}
+            >
+              <FolderGit2 size={12} />
+              <span>{state.workspace.name}</span>
+              <span className="ws-branch">{state.workspace.base_branch}</span>
+            </button>
+          )}
+
           <button
-            className="mcp-pill"
-            onClick={handleCopyMcp}
-            title="Click to copy local MCP endpoint"
+            className="cmd-trigger"
+            onClick={() => setShowPalette(true)}
+            title={`Command Palette (${shortcuts.command_palette})`}
           >
-            <span className="mcp-dot" />
-            127.0.0.1:{state?.mcp_port ?? "4739"}
+            <Search size={12} />
+            <kbd>{shortcuts.command_palette}</kbd>
           </button>
+
           <button
             className="btn btn-ghost"
             onClick={() => setShowMcps(true)}
-            title="Install & Manage GitHub MCPs (Ctrl+M)"
+            title={`GitHub MCPs (${shortcuts.open_mcps})`}
           >
             <Plug size={13} />
             MCPs
-            {(state?.installed_mcps?.filter((m) => m.enabled).length ?? 0) >
-              0 && (
-              <span className="count-badge alert">
-                {state?.installed_mcps.filter((m) => m.enabled).length}
-              </span>
+            {enabledMcpsCount > 0 && (
+              <span className="count-badge alert">{enabledMcpsCount}</span>
             )}
           </button>
-          <button className="btn btn-ghost" onClick={handleLoadSample}>
-            <Sparkles size={13} />
-            Sample Review
-          </button>
-          <button className="btn btn-ghost" onClick={() => setShowCentral(true)}>
-            <BookOpen size={13} />
-            AGENTS.md
-          </button>
+
           <button
-            className="btn btn-primary"
-            onClick={() => setShowNewTab(true)}
-            title="New Agent Tab (Ctrl+N)"
+            className="btn btn-ghost"
+            onClick={() => setShowCentral(true)}
+            title="Central AGENTS.md & Meta-Skills"
           >
-            <Plus size={14} />
-            New Agent
+            <BookOpen size={13} />
+          </button>
+
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowSettings(true)}
+            title={`Settings & Shortcuts (${shortcuts.open_settings})`}
+          >
+            <Settings size={14} />
           </button>
         </div>
       </header>
 
-      <div className="workspace">
-        {sidebarOpen && (
-          <aside className="sidebar">
-            <div className="sidebar-section">
-              <div className="sidebar-header">
-                <span>Agent Worktrees</span>
-                <span className="count-badge">{activeTabs.length}</span>
-              </div>
-              <div className="sidebar-list">
-                {activeTabs.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: 11.5,
-                      color: "var(--muted)",
-                      padding: "10px 6px",
-                    }}
-                  >
-                    Press <kbd>Ctrl+N</kbd> to spawn an isolated Git worktree
-                    with a native PTY.
-                  </div>
-                ) : (
-                  activeTabs.map((tab, idx) => (
-                    <div
-                      key={tab.id}
-                      className={`tab-card ${tab.id === activeTabId ? "active" : ""} ${tab.state === "Blocked" ? "blocked" : ""}`}
-                      onClick={() => setActiveTabId(tab.id)}
-                    >
-                      <div className="tab-top">
-                        <span className="tab-name">{tab.feature_id}</span>
-                        <span className={`state-pill state-${tab.state}`}>
-                          {tab.state}
-                        </span>
-                      </div>
-                      <div className="tab-meta">
-                        <span className="cli-tag">{tab.cli}</span>
-                        <GitBranch size={11} />
-                        <span
-                          style={{
-                            flex: 1,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {tab.branch_name}
-                        </span>
-                        {idx < 9 && <kbd>{idx + 1}</kbd>}
-                      </div>
-                      {tab.ping_message && (
-                        <div className="ping-banner">
-                          <span
-                            style={{
-                              display: "flex",
-                              gap: 5,
-                              alignItems: "center",
-                            }}
-                          >
-                            <BellRing size={11} />
-                            {tab.ping_message}
-                          </span>
-                          <button
-                            className="btn"
-                            style={{ height: 20, padding: "0 6px", fontSize: 10 }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDismissPing(tab.id);
-                            }}
-                          >
-                            Ack
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className="sidebar-section">
-              <div className="sidebar-header">
-                <span>Review Queue</span>
-                <span
-                  className={`count-badge ${pendingCount > 0 ? "alert" : ""}`}
-                >
-                  {pendingCount} pending
-                </span>
-              </div>
-              <div className="sidebar-list">
-                {reviews.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: 11.5,
-                      color: "var(--muted)",
-                      padding: "10px 6px",
-                    }}
-                  >
-                    Waiting for <code>submit_changelog</code> MCP calls.
-                  </div>
-                ) : (
-                  reviews.map((rev) => (
-                    <div
-                      key={rev.id}
-                      className={`tab-card ${rev.id === activeReviewId ? "active" : ""}`}
-                      onClick={() => {
-                        setActiveReviewId(rev.id);
-                        setActiveTabId(rev.tab_id);
-                      }}
-                    >
-                      <div className="tab-top">
-                        <span className="tab-name">{rev.feature_id}</span>
-                        <span
-                          className={`state-pill state-${rev.status === "Pending" ? "NeedsReview" : rev.status === "Approved" ? "Approved" : "Working"}`}
-                        >
-                          #{rev.iteration} {rev.status}
-                        </span>
-                      </div>
-                      <div className="tab-meta">
-                        <FileCode2 size={11} />
-                        <span>5-subtab contract verified</span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </aside>
+      <main className="workspace">
+        {mainTab === "board" && (
+          <BoardView
+            issues={state?.issues ?? []}
+            tabs={state?.tabs ?? []}
+            defaultCli={settings.default_cli}
+            onCreateIssue={handleCreateIssue}
+            onUpdateIssue={handleUpdateIssue}
+            onDeleteIssue={handleDeleteIssue}
+            onSpawnForIssue={handleSpawnForIssue}
+            onOpenTerminal={(tabId) => {
+              setActiveTabId(tabId);
+              setMainTab("terminals");
+            }}
+            onDismissPing={handleDismissPing}
+            newIssueOpen={newIssueOpen}
+            setNewIssueOpen={setNewIssueOpen}
+          />
         )}
 
-        <main className="main-pane">
-          {activeTab ? (
-            <TerminalPane tab={activeTab} onCloseTab={handleCloseTab} />
-          ) : !activeReview ? (
-            <div className="empty-state">
-              <TerminalIcon size={34} color="#f97316" />
-              <h2>Local Rust Agent Software Factory</h2>
-              <p>
-                Spawn isolated Git worktrees with native OS PTYs, automatic{" "}
-                <code>AGENTS.md</code> &amp; <code>.skills/</code> injection, an
-                embedded Axum MCP server, and 5-subtab HTML changelog reviews.
-              </p>
-              <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => setShowNewTab(true)}
-                >
-                  <Plus size={14} /> Spawn Agent <kbd style={{ color: "#090b10", borderColor: "rgba(0,0,0,0.2)" }}>Ctrl+N</kbd>
-                </button>
-                <button className="btn" onClick={handleLoadSample}>
-                  <Sparkles size={13} /> Preview 5-Subtab Reviewer
-                </button>
-              </div>
-            </div>
-          ) : null}
+        {mainTab === "terminals" && (
+          <TerminalsView
+            tabs={state?.tabs ?? []}
+            activeTabId={activeTabId}
+            defaultCli={settings.default_cli}
+            onSelectTab={setActiveTabId}
+            onQuickSpawn={handleQuickSpawn}
+            onCloseTab={handleCloseTab}
+            onDismissPing={handleDismissPing}
+          />
+        )}
 
-          {activeReview && (
-            <ChangelogViewer
-              review={activeReview}
-              onClose={() => setActiveReviewId(null)}
-              onRequestChanges={handleRequestChanges}
-              onApprove={handleApprove}
-            />
-          )}
-        </main>
-      </div>
+        {mainTab === "changelogs" && (
+          <ChangelogsView
+            reviews={reviews}
+            activeReviewId={activeReviewId}
+            onSelectReview={setActiveReviewId}
+            onRequestChanges={handleRequestChanges}
+            onApprove={handleApprove}
+            onLoadSample={handleLoadSample}
+          />
+        )}
+      </main>
 
       <footer className="statusbar">
         <div className="statusbar-hints">
           <span>
-            <kbd>Ctrl+K</kbd> Palette
+            <kbd>{shortcuts.tab_board}</kbd> Board
           </span>
           <span>
-            <kbd>Ctrl+N</kbd> New Agent
+            <kbd>{shortcuts.tab_terminals}</kbd> Terminals
           </span>
           <span>
-            <kbd>Ctrl+M</kbd> GitHub MCPs
+            <kbd>{shortcuts.tab_changelogs}</kbd> Changelogs
           </span>
           <span>
-            <kbd>Ctrl+B</kbd> Sidebar
+            <kbd>{shortcuts.new_issue}</kbd> New Spec
           </span>
           <span>
-            <kbd>Ctrl+1-9</kbd> Switch Tab
+            <kbd>{shortcuts.new_terminal}</kbd> Quick {settings.default_cli}
           </span>
         </div>
-        <div>
-          {activeTabs.length} active &middot; {pendingCount} pending review
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <span style={{ color: "#86efac", fontFamily: "var(--mono)" }}>
+            MCP :{state?.mcp_port ?? 4739}
+          </span>
+          <span>
+            Default: <code>{settings.default_cli}</code>
+          </span>
         </div>
       </footer>
 
@@ -420,24 +420,20 @@ export function App() {
         <CommandPalette
           tabs={activeTabs}
           reviews={reviews}
+          shortcuts={shortcuts}
           onClose={() => setShowPalette(false)}
-          onSelectTab={(id) => setActiveTabId(id)}
-          onSelectReview={(rev) => {
-            setActiveReviewId(rev.id);
-            setActiveTabId(rev.tab_id);
+          onSwitchMainTab={setMainTab}
+          onSelectTab={setActiveTabId}
+          onSelectReview={setActiveReviewId}
+          onNewIssue={() => {
+            setMainTab("board");
+            setNewIssueOpen(true);
           }}
-          onNewTab={() => setShowNewTab(true)}
-          onOpenCentral={() => setShowCentral(true)}
+          onQuickSpawn={handleQuickSpawn}
           onOpenMcps={() => setShowMcps(true)}
+          onOpenCentral={() => setShowCentral(true)}
+          onOpenSettings={() => setShowSettings(true)}
           onLoadSample={handleLoadSample}
-          onToggleSidebar={() => setSidebarOpen((v) => !v)}
-        />
-      )}
-
-      {showNewTab && (
-        <NewTabModal
-          onClose={() => setShowNewTab(false)}
-          onCreate={handleCreateTab}
         />
       )}
 
@@ -458,6 +454,18 @@ export function App() {
           mcps={state?.installed_mcps ?? []}
           onClose={() => setShowMcps(false)}
           onChanged={(msg) => {
+            notify(msg);
+            refresh();
+          }}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          settings={settings}
+          onClose={() => setShowSettings(false)}
+          onSave={handleSaveSettings}
+          onConfigTransferred={(msg) => {
             notify(msg);
             refresh();
           }}

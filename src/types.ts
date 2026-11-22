@@ -1,15 +1,24 @@
 export type AgentState =
   | "Working"
+  | "Inactive"
   | "NeedsReview"
   | "Blocked"
   | "Approved"
   | "Archived";
+
+export type AgentPermission = "default" | "auto" | "dangerously-skip";
 
 export type AgentCli = "claude" | "codex" | "antigravity" | "shell";
 
 export type PingUrgency = "low" | "normal" | "high" | "critical";
 
 export type ReviewStatus = "Pending" | "ChangesRequested" | "Approved";
+
+export type IssueStatus = "Open" | "InProgress" | "InReview" | "Done";
+
+export type IssuePriority = "low" | "medium" | "high" | "critical";
+
+export type MainTab = "board" | "terminals" | "changelogs";
 
 export interface AgentTab {
   id: string;
@@ -24,6 +33,7 @@ export interface AgentTab {
   initial_prompt: string;
   ping_message: string | null;
   ping_urgency: PingUrgency | null;
+  issue_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -38,6 +48,47 @@ export interface ReviewItem {
   feedback: string | null;
   submitted_at: string;
   reviewed_at: string | null;
+}
+
+export interface IssueComment {
+  id: string;
+  issue_id: string;
+  author: string;
+  body: string;
+  created_at: string;
+}
+
+export interface Issue {
+  id: string;
+  number: number;
+  workspace_path: string;
+  title: string;
+  spec: string;
+  status: IssueStatus;
+  priority: IssuePriority;
+  labels: string[];
+  assigned_tab_id: string | null;
+  branch_name: string | null;
+  comments: IssueComment[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceInfo {
+  path: string;
+  name: string;
+  is_git_repo: boolean;
+  base_branch: string;
+  remote_url: string | null;
+}
+
+export interface AppSettings {
+  default_cli: AgentCli;
+  default_permission: AgentPermission;
+  notify_on_inactive: boolean;
+  inactive_timeout_secs: number;
+  shortcuts: Record<string, string>;
+  recent_workspaces: string[];
 }
 
 export interface InstalledMcp {
@@ -59,19 +110,23 @@ export interface BootstrapState {
   mcp_port: number;
   mcp_url: string;
   central_dir: string;
+  workspace: WorkspaceInfo | null;
+  settings: AppSettings;
   tabs: AgentTab[];
   reviews: ReviewItem[];
+  issues: Issue[];
   central_files: string[];
   installed_mcps: InstalledMcp[];
 }
 
 export interface CreateTabRequest {
-  cli: AgentCli;
-  repo_path: string;
-  base_branch: string;
-  slug: string;
-  initial_prompt: string;
+  cli?: AgentCli;
+  repo_path?: string;
+  base_branch?: string;
+  slug?: string;
+  initial_prompt?: string;
   skip_worktree?: boolean;
+  issue_id?: string;
 }
 
 export interface PtyOutputPayload {

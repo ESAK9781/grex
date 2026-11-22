@@ -1,6 +1,6 @@
 [package]
 name = "grex"
-version = "0.1.1"
+version = "0.2.0"
 description = "Grex — Local multi-agent software factory with native PTYs, Git worktrees, embedded MCP server, and 5-subtab HTML changelog reviews"
 authors = ["Grex Contributors"]
 license = "MIT"

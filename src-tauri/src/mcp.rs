@@ -3,8 +3,8 @@ use crate::changelog::validate_changelog_file;
 use crate::db::Database;
 use crate::git::{get_head_commit, get_touched_files};
 use crate::models::{
-    AgentState, FactoryState, PingEventPayload, PingUrgency, RepoHeadInfo, ReviewStatus,
-    WorktreeStateInfo,
+    AgentState, FactoryState, IssuePriority, IssueStatus, PingEventPayload, PingUrgency,
+    RepoHeadInfo, ReviewStatus, WorktreeStateInfo,
 };
 use axum::{
     extract::State,
@@ -258,6 +258,50 @@ pub fn mcp_tool_schemas() -> Value {
                 },
                 "required": ["target_file", "content"]
             }
+        },
+        {
+            "name": "list_issues",
+            "description": "Lists feature specs and issues from the Grex management board.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["Open", "InProgress", "InReview", "Done"], "description": "Optional status filter" }
+                }
+            }
+        },
+        {
+            "name": "update_issue",
+            "description": "Updates an issue on the Grex board (status, progress comment, branch_name). Also supports appending to the issue spec (append_spec), adding labels (add_labels), or changing priority/title — ONLY modify specs/labels/priority/title when explicitly instructed by the user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Issue UUID or number (e.g. '1' or '#1')" },
+                    "status": { "type": "string", "enum": ["Open", "InProgress", "InReview", "Done"] },
+                    "comment": { "type": "string", "description": "Progress update or note to post on the issue timeline" },
+                    "branch_name": { "type": "string", "description": "Feature branch name chosen by the agent" },
+                    "append_spec": { "type": "string", "description": "Markdown text to append to the issue spec (ONLY use when explicitly instructed by the user)" },
+                    "add_labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to add to the issue (ONLY use when explicitly instructed by the user)" },
+                    "priority": { "type": "string", "enum": ["low", "medium", "high", "critical"], "description": "Updated priority (ONLY use when explicitly instructed by the user)" },
+                    "title": { "type": "string", "description": "Updated title (ONLY use when explicitly instructed by the user)" },
+                    "author": { "type": "string", "description": "Agent name/handle (defaults to 'agent')" }
+                },
+                "required": ["issue_id"]
+            }
+        },
+        {
+            "name": "create_issue",
+            "description": "Creates a new issue/spec on the Grex issue board. ONLY call this tool when explicitly instructed by the user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "spec": { "type": "string" },
+                    "priority": { "type": "string", "enum": ["low", "medium", "high", "critical"], "default": "medium" },
+                    "labels": { "type": "array", "items": { "type": "string" } },
+                    "workspace_path": { "type": "string", "description": "Optional workspace path" }
+                },
+                "required": ["title", "spec"]
+            }
         }
     ])
 }
@@ -282,6 +326,26 @@ async fn dispatch_tool_call(ctx: &McpContext, name: &str, args: Value) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("No agent tab found for feature_id '{feature_id}'"))?;
 
             let review = ctx.db.enqueue_review(&tab.id, &tab.feature_id, html_path)?;
+
+            if let Some(ref issue_id) = tab.issue_id {
+                let _ = ctx.db.update_issue(
+                    issue_id,
+                    None,
+                    None,
+                    Some(IssueStatus::InReview),
+                    None,
+                    None,
+                    Some(&tab.id),
+                    Some(&tab.branch_name),
+                    Some((
+                        tab.cli.as_str(),
+                        &format!(
+                            "Submitted 5-subtab changelog (Iteration #{}) for review.",
+                            review.iteration
+                        ),
+                    )),
+                );
+            }
 
             let _ = ctx.app.emit("changelog-submitted", &review);
             let _ = ctx.app.emit("factory-updated", ());
@@ -374,6 +438,128 @@ async fn dispatch_tool_call(ctx: &McpContext, name: &str, args: Value) -> anyhow
                 "commit": commit
             })
             .to_string())
+        }
+        "list_issues" => {
+            let status_filter = args
+                .get("status")
+                .and_then(Value::as_str)
+                .map(IssueStatus::parse);
+            let mut issues = ctx.db.list_issues(None)?;
+            if let Some(st) = status_filter {
+                issues.retain(|i| i.status == st);
+            }
+            Ok(serde_json::to_string_pretty(&issues)?)
+        }
+        "update_issue" => {
+            let issue_id = args
+                .get("issue_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument: issue_id"))?;
+            let status = args
+                .get("status")
+                .and_then(Value::as_str)
+                .map(IssueStatus::parse);
+            let priority = args
+                .get("priority")
+                .and_then(Value::as_str)
+                .map(IssuePriority::parse);
+            let title = args.get("title").and_then(Value::as_str);
+            let branch_name = args.get("branch_name").and_then(Value::as_str);
+            let comment = args.get("comment").and_then(Value::as_str);
+            let append_spec = args.get("append_spec").and_then(Value::as_str);
+            let add_labels: Option<Vec<String>> = args
+                .get("add_labels")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                });
+            let author = args
+                .get("author")
+                .and_then(Value::as_str)
+                .unwrap_or("agent");
+
+            let existing = ctx
+                .db
+                .get_issue(issue_id)?
+                .ok_or_else(|| anyhow::anyhow!("Issue '{issue_id}' not found"))?;
+
+            let merged_spec = append_spec.map(|extra| {
+                if existing.spec.trim().is_empty() {
+                    extra.trim().to_string()
+                } else {
+                    format!("{}\n\n{}", existing.spec.trim_end(), extra.trim())
+                }
+            });
+
+            let merged_labels = add_labels.map(|extra| {
+                let mut labels = existing.labels.clone();
+                for l in extra {
+                    if !labels.contains(&l) {
+                        labels.push(l);
+                    }
+                }
+                labels
+            });
+
+            let updated = ctx.db.update_issue(
+                &existing.id,
+                title,
+                merged_spec.as_deref(),
+                status,
+                priority,
+                merged_labels,
+                None,
+                branch_name,
+                comment.map(|c| (author, c)),
+            )?;
+            let _ = ctx.app.emit("factory-updated", ());
+            Ok(serde_json::to_string_pretty(&updated)?)
+        }
+        "create_issue" => {
+            let title = args
+                .get("title")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument: title"))?;
+            let spec = args
+                .get("spec")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let priority = args
+                .get("priority")
+                .and_then(Value::as_str)
+                .map(IssuePriority::parse)
+                .unwrap_or(IssuePriority::Medium);
+            let labels = args
+                .get("labels")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let workspace_path = args
+                .get("workspace_path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    ctx.db
+                        .load_settings()
+                        .recent_workspaces
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| ".".to_string())
+                });
+
+            let created = ctx
+                .db
+                .create_issue(&workspace_path, title, spec, priority, labels)?;
+            let _ = ctx.app.emit("factory-updated", ());
+            Ok(serde_json::to_string_pretty(&created)?)
         }
         unknown => Err(anyhow::anyhow!("Unknown MCP tool: {unknown}")),
     }

@@ -1,7 +1,7 @@
 {
   "name": "grex",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Local multi-agent software factory built with Rust, Tauri v2, portable-pty, SQLite, and an embedded MCP server.",
   "scripts": {

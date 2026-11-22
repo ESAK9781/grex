@@ -13,7 +13,12 @@ You are operating inside a **Grex Local Software Factory** worktree. Multiple au
    - `AGENT_FEATURE_ID`: Your assigned feature identifier (pass this to `submit_changelog` and `ping_user`).
    - `FACTORY_MCP_PORT` / `FACTORY_MCP_URL`: Local Grex MCP server endpoint.
 
-3. **Unblock Early via `ping_user`**
+3. **Update the Issue Board Like a Human**
+   - Use `list_issues` to inspect open specs and requirements.
+   - Use `update_issue(issue_id, status?, comment?, branch_name?, author?)` to move your assigned issue (`Open` -> `InProgress` -> `InReview` -> `Done`), post concise progress updates, and record your chosen feature branch name.
+   - **Explicit User Permission Required to Add/Edit Issues:** `create_issue` and `update_issue` spec/label/title edits (`append_spec`, `add_labels`, `title`, `priority`) are available so you can add details or file issues when asked — **ONLY** use those to add content to issues or create new issues when **explicitly told to do so by the user**. Never file unsolicited issues or mutate specs on your own.
+
+4. **Unblock Early via `ping_user`**
    - If you hit an ambiguous requirement, missing credential, or conflicting edit with another agent, call `ping_user(message, urgency)` immediately so the operator's tab highlights with an OS alert.
 
 4. **Deliver via the 5-Subtab HTML Changelog Contract**

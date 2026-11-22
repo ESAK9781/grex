@@ -9,12 +9,34 @@ pub mod models;
 pub mod pty;
 
 use central::{default_central_dir, ensure_central_config};
-use commands::AppState;
+use commands::{strip_windows_verbatim_prefix, AppState};
 use db::Database;
+use git::inspect_workspace;
 use mcp::start_mcp_server;
 use pty::PtyManager;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tauri::{Emitter, Manager};
+
+fn resolve_cli_workspace_arg() -> Option<PathBuf> {
+    let arg = std::env::args().nth(1)?;
+    if arg.starts_with('-') {
+        return None;
+    }
+    let raw = PathBuf::from(&arg);
+    let abs = if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir().ok()?.join(raw)
+    };
+    let canonical = std::fs::canonicalize(&abs).unwrap_or(abs);
+    let cleaned = strip_windows_verbatim_prefix(&canonical);
+    if cleaned.exists() && cleaned.is_dir() {
+        Some(cleaned)
+    } else {
+        None
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -33,11 +55,14 @@ pub fn run() {
         Database::open(&db_path).expect("failed to initialize SQLite state database"),
     );
 
+    let cli_workspace_path = resolve_cli_workspace_arg();
+
     let app_state = AppState {
         db: db.clone(),
         pty: PtyManager::new(),
         central_dir: central_dir.clone(),
         mcp_port: RwLock::new(4739),
+        session_workspace: RwLock::new(None),
     };
 
     tauri::Builder::default()
@@ -48,6 +73,20 @@ pub fn run() {
             let handle = app.handle().clone();
             let db_clone = db.clone();
             let central_clone = central_dir.clone();
+
+            // If launched as `grex ./` or `grex <dir>`, inspect and bind the session workspace immediately
+            if let Some(ws_path) = cli_workspace_path.clone() {
+                let ws_handle = handle.clone();
+                let ws_db = db.clone();
+                tauri::async_runtime::spawn(async move {
+                    let info = inspect_workspace(&ws_path).await;
+                    let _ = ws_db.record_recent_workspace(&info.path);
+                    if let Some(st) = ws_handle.try_state::<AppState>() {
+                        *st.session_workspace.write().unwrap() = Some(info);
+                    }
+                    let _ = ws_handle.emit("factory-updated", ());
+                });
+            }
 
             // Bootstrap ~/.agent-factory/ asynchronously so cold startup is instant
             let bootstrap_dir = central_dir.clone();
@@ -78,8 +117,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap_state,
+            commands::set_session_workspace,
+            commands::init_workspace_git,
+            commands::clone_workspace_repo,
+            commands::save_app_settings,
             commands::detect_git_branch,
             commands::create_agent_tab,
+            commands::create_issue_cmd,
+            commands::update_issue_cmd,
+            commands::delete_issue_cmd,
+            commands::spawn_agent_for_issue,
             commands::ensure_pty_running,
             commands::write_pty,
             commands::resize_pty,
@@ -100,6 +147,8 @@ pub fn run() {
             commands::update_mcp_env_cmd,
             commands::remove_mcp_cmd,
             commands::sync_mcps_to_worktrees,
+            commands::export_full_config,
+            commands::import_full_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Grex Tauri application");

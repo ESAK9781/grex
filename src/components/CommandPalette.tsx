@@ -2,47 +2,55 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   FileCode2,
-  PanelLeft,
+  LayoutList,
+  Plug,
   Plus,
   Search,
+  Settings,
   Sparkles,
   Terminal,
 } from "lucide-react";
-import type { AgentTab, ReviewItem } from "../types";
+import type { AgentTab, MainTab, ReviewItem } from "../types";
 
-export interface PaletteAction {
+interface PaletteAction {
   id: string;
   label: string;
   hint?: string;
-  category: "Action" | "Agent Tab" | "Review Queue";
-  icon: "plus" | "book" | "sparkles" | "sidebar" | "terminal" | "review";
+  category: "Navigation" | "Action" | "Terminal" | "Changelog";
+  icon: "board" | "terminal" | "review" | "plus" | "mcp" | "book" | "settings" | "sparkles";
   run: () => void;
 }
 
 interface CommandPaletteProps {
   tabs: AgentTab[];
   reviews: ReviewItem[];
+  shortcuts: Record<string, string>;
   onClose: () => void;
+  onSwitchMainTab: (t: MainTab) => void;
   onSelectTab: (tabId: string) => void;
-  onSelectReview: (review: ReviewItem) => void;
-  onNewTab: () => void;
-  onOpenCentral: () => void;
+  onSelectReview: (reviewId: string) => void;
+  onNewIssue: () => void;
+  onQuickSpawn: () => void;
   onOpenMcps: () => void;
+  onOpenCentral: () => void;
+  onOpenSettings: () => void;
   onLoadSample: () => void;
-  onToggleSidebar: () => void;
 }
 
 export function CommandPalette({
   tabs,
   reviews,
+  shortcuts,
   onClose,
+  onSwitchMainTab,
   onSelectTab,
   onSelectReview,
-  onNewTab,
-  onOpenCentral,
+  onNewIssue,
+  onQuickSpawn,
   onOpenMcps,
+  onOpenCentral,
+  onOpenSettings,
   onLoadSample,
-  onToggleSidebar,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -55,29 +63,84 @@ export function CommandPalette({
   const actions = useMemo<PaletteAction[]>(() => {
     const base: PaletteAction[] = [
       {
-        id: "new-tab",
-        label: "Spawn New Agent Worktree Tab",
-        hint: "Ctrl+N",
+        id: "nav-board",
+        label: "Go to Board (Management & Specs)",
+        hint: shortcuts.tab_board,
+        category: "Navigation",
+        icon: "board",
+        run: () => {
+          onSwitchMainTab("board");
+          onClose();
+        },
+      },
+      {
+        id: "nav-terminals",
+        label: "Go to Terminals",
+        hint: shortcuts.tab_terminals,
+        category: "Navigation",
+        icon: "terminal",
+        run: () => {
+          onSwitchMainTab("terminals");
+          onClose();
+        },
+      },
+      {
+        id: "nav-changelogs",
+        label: "Go to Changelogs (Fullscreen)",
+        hint: shortcuts.tab_changelogs,
+        category: "Navigation",
+        icon: "review",
+        run: () => {
+          onSwitchMainTab("changelogs");
+          onClose();
+        },
+      },
+      {
+        id: "new-issue",
+        label: "Write New Feature Spec / Issue",
+        hint: shortcuts.new_issue,
         category: "Action",
         icon: "plus",
         run: () => {
           onClose();
-          onNewTab();
+          onNewIssue();
         },
       },
       {
-        id: "github-mcps",
-        label: "Install & Manage GitHub MCP Servers",
-        hint: "Ctrl+M",
+        id: "quick-terminal",
+        label: "Spawn Quick Agent Terminal",
+        hint: shortcuts.new_terminal,
         category: "Action",
-        icon: "plus",
+        icon: "terminal",
+        run: () => {
+          onClose();
+          onQuickSpawn();
+        },
+      },
+      {
+        id: "open-mcps",
+        label: "Install & Manage GitHub MCP Servers",
+        hint: shortcuts.open_mcps,
+        category: "Action",
+        icon: "mcp",
         run: () => {
           onClose();
           onOpenMcps();
         },
       },
       {
-        id: "central-config",
+        id: "open-settings",
+        label: "Settings & Keyboard Shortcuts",
+        hint: shortcuts.open_settings,
+        category: "Action",
+        icon: "settings",
+        run: () => {
+          onClose();
+          onOpenSettings();
+        },
+      },
+      {
+        id: "open-central",
         label: "Edit Central AGENTS.md & Meta-Skills",
         hint: "~/.agent-factory",
         category: "Action",
@@ -88,19 +151,8 @@ export function CommandPalette({
         },
       },
       {
-        id: "toggle-sidebar",
-        label: "Toggle Sidebar",
-        hint: "Ctrl+B",
-        category: "Action",
-        icon: "sidebar",
-        run: () => {
-          onClose();
-          onToggleSidebar();
-        },
-      },
-      {
         id: "sample-review",
-        label: "Load Sample 5-Subtab Changelog Review",
+        label: "Load Sample 5-Subtab Changelog",
         hint: "Demo",
         category: "Action",
         icon: "sparkles",
@@ -116,10 +168,11 @@ export function CommandPalette({
         id: `tab-${tab.id}`,
         label: `${tab.feature_id} (${tab.cli})`,
         hint: `${tab.branch_name} · ${tab.state}`,
-        category: "Agent Tab",
+        category: "Terminal",
         icon: "terminal",
         run: () => {
           onSelectTab(tab.id);
+          onSwitchMainTab("terminals");
           onClose();
         },
       });
@@ -128,12 +181,13 @@ export function CommandPalette({
     for (const rev of reviews) {
       base.push({
         id: `rev-${rev.id}`,
-        label: `Review ${rev.feature_id} #${rev.iteration}`,
+        label: `Changelog: ${rev.feature_id} #${rev.iteration}`,
         hint: rev.status,
-        category: "Review Queue",
+        category: "Changelog",
         icon: "review",
         run: () => {
-          onSelectReview(rev);
+          onSelectReview(rev.id);
+          onSwitchMainTab("changelogs");
           onClose();
         },
       });
@@ -143,14 +197,17 @@ export function CommandPalette({
   }, [
     tabs,
     reviews,
+    shortcuts,
     onClose,
-    onNewTab,
-    onOpenCentral,
-    onOpenMcps,
-    onLoadSample,
-    onToggleSidebar,
+    onSwitchMainTab,
     onSelectTab,
     onSelectReview,
+    onNewIssue,
+    onQuickSpawn,
+    onOpenMcps,
+    onOpenCentral,
+    onOpenSettings,
+    onLoadSample,
   ]);
 
   const filtered = useMemo(() => {
@@ -186,18 +243,22 @@ export function CommandPalette({
 
   function renderIcon(kind: PaletteAction["icon"]) {
     switch (kind) {
-      case "plus":
-        return <Plus size={14} />;
-      case "book":
-        return <BookOpen size={14} />;
-      case "sparkles":
-        return <Sparkles size={14} />;
-      case "sidebar":
-        return <PanelLeft size={14} />;
+      case "board":
+        return <LayoutList size={14} />;
       case "terminal":
         return <Terminal size={14} />;
       case "review":
         return <FileCode2 size={14} />;
+      case "plus":
+        return <Plus size={14} />;
+      case "mcp":
+        return <Plug size={14} />;
+      case "book":
+        return <BookOpen size={14} />;
+      case "settings":
+        return <Settings size={14} />;
+      case "sparkles":
+        return <Sparkles size={14} />;
     }
   }
 
@@ -212,7 +273,7 @@ export function CommandPalette({
           <Search size={15} color="var(--muted)" />
           <input
             ref={inputRef}
-            placeholder="Jump to agent tab, review, or factory action..."
+            placeholder="Jump to board, terminal, changelog, or action..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

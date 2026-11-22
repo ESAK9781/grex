@@ -28,6 +28,132 @@ pub async fn detect_default_branch(repo_path: &Path) -> String {
     "main".to_string()
 }
 
+pub async fn inspect_workspace(path: &Path) -> crate::models::WorkspaceInfo {
+    let is_git_repo = path.join(".git").exists()
+        || hidden_cmd("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(path)
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+    let base_branch = if is_git_repo {
+        detect_default_branch(path).await
+    } else {
+        "main".to_string()
+    };
+
+    let remote_url = if is_git_repo {
+        hidden_cmd("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(path)
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace")
+        .to_string();
+
+    crate::models::WorkspaceInfo {
+        path: path.to_string_lossy().to_string(),
+        name,
+        is_git_repo,
+        base_branch,
+        remote_url,
+    }
+}
+
+/// Initializes a new git repository at `dir` with an initial commit so worktrees work immediately.
+pub async fn init_git_repo(dir: &Path) -> Result<crate::models::WorkspaceInfo> {
+    tokio::fs::create_dir_all(dir).await?;
+    let init = hidden_cmd("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dir)
+        .output()
+        .await
+        .context("git init")?;
+    if !init.status.success() {
+        return Err(anyhow!(
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ));
+    }
+
+    // Ensure at least one commit exists so `git worktree add` succeeds
+    let has_head = hidden_cmd("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !has_head {
+        let _ = hidden_cmd("git")
+            .args(["add", "-A"])
+            .current_dir(dir)
+            .output()
+            .await;
+        let _ = hidden_cmd("git")
+            .args([
+                "-c",
+                "user.name=Grex",
+                "-c",
+                "user.email=grex@local.factory",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial commit (Grex workspace)",
+            ])
+            .current_dir(dir)
+            .output()
+            .await;
+    }
+
+    Ok(inspect_workspace(dir).await)
+}
+
+/// Clones a GitHub URL into `dir` (creating it if needed).
+pub async fn clone_git_repo(
+    dir: &Path,
+    repo_url: &str,
+) -> Result<crate::models::WorkspaceInfo> {
+    let url = if repo_url.contains("://") || repo_url.starts_with("git@") {
+        repo_url.trim().to_string()
+    } else {
+        format!("https://github.com/{}.git", repo_url.trim().trim_end_matches(".git"))
+    };
+
+    if let Some(parent) = dir.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let out = hidden_cmd("git")
+        .args(["clone", &url, &dir.to_string_lossy()])
+        .output()
+        .await
+        .context("git clone")?;
+
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git clone failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+
+    Ok(inspect_workspace(dir).await)
+}
+
 pub async fn get_head_commit(repo_path: &Path, branch: &str) -> String {
     if let Ok(out) = hidden_cmd("git")
         .args(["rev-parse", "--short", branch])

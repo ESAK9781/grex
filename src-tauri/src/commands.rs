@@ -5,12 +5,14 @@ use crate::central::{
 use crate::changelog::validate_changelog_file;
 use crate::db::Database;
 use crate::git::{
-    approve_and_merge, create_worktree, detect_default_branch, inject_central_config,
-    remove_worktree,
+    approve_and_merge, clone_git_repo, create_worktree, detect_default_branch, init_git_repo,
+    inject_central_config, inspect_workspace, remove_worktree,
 };
 use crate::mcp::build_factory_state;
 use crate::models::{
-    AgentCli, AgentState, AgentTab, BootstrapState, CreateTabRequest, FactoryState, ReviewItem,
+    AgentCli, AgentPermission, AgentState, AgentTab, AppSettings, BootstrapState,
+    CreateIssueRequest, CreateTabRequest, FactoryState, GrexConfigBundle, Issue, IssuePriority,
+    IssueStatus, ReviewItem, UpdateIssueRequest, WorkspaceInfo,
 };
 use crate::pty::{PtyManager, SpawnPtyOptions};
 use chrono::Utc;
@@ -24,11 +26,16 @@ pub struct AppState {
     pub pty: PtyManager,
     pub central_dir: PathBuf,
     pub mcp_port: RwLock<u16>,
+    pub session_workspace: RwLock<Option<WorkspaceInfo>>,
 }
 
 impl AppState {
     pub fn port(&self) -> u16 {
         *self.mcp_port.read().unwrap()
+    }
+
+    pub fn workspace(&self) -> Option<WorkspaceInfo> {
+        self.session_workspace.read().unwrap().clone()
     }
 }
 
@@ -36,6 +43,12 @@ impl AppState {
 pub async fn get_bootstrap_state(state: State<'_, AppState>) -> Result<BootstrapState, String> {
     let tabs = state.db.list_tabs().map_err(|e| e.to_string())?;
     let reviews = state.db.list_reviews().map_err(|e| e.to_string())?;
+    let workspace = state.workspace();
+    let issues = state
+        .db
+        .list_issues(workspace.as_ref().map(|w| w.path.as_str()))
+        .map_err(|e| e.to_string())?;
+    let settings = state.db.load_settings();
     let central_files = list_central_files(&state.central_dir);
     let installed_mcps = crate::mcps::load_registry(&state.central_dir);
     let port = state.port();
@@ -44,11 +57,78 @@ pub async fn get_bootstrap_state(state: State<'_, AppState>) -> Result<Bootstrap
         mcp_port: port,
         mcp_url: format!("http://127.0.0.1:{port}/mcp"),
         central_dir: state.central_dir.to_string_lossy().to_string(),
+        workspace,
+        settings,
         tabs,
         reviews,
+        issues,
         central_files,
         installed_mcps,
     })
+}
+
+#[tauri::command]
+pub async fn set_session_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorkspaceInfo, String> {
+    let p = PathBuf::from(path.trim());
+    if !p.exists() {
+        return Err(format!("Directory does not exist: {}", p.display()));
+    }
+    let canonical = std::fs::canonicalize(&p).unwrap_or(p);
+    let normalized = strip_windows_verbatim_prefix(&canonical);
+    let info = inspect_workspace(&normalized).await;
+    *state.session_workspace.write().unwrap() = Some(info.clone());
+    let _ = state.db.record_recent_workspace(&info.path);
+    let _ = app.emit("factory-updated", ());
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn init_workspace_git(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorkspaceInfo, String> {
+    let p = PathBuf::from(path.trim());
+    let info = init_git_repo(&p).await.map_err(|e| e.to_string())?;
+    *state.session_workspace.write().unwrap() = Some(info.clone());
+    let _ = state.db.record_recent_workspace(&info.path);
+    let _ = app.emit("factory-updated", ());
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn clone_workspace_repo(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    repo_url: String,
+) -> Result<WorkspaceInfo, String> {
+    let p = PathBuf::from(path.trim());
+    let info = clone_git_repo(&p, &repo_url)
+        .await
+        .map_err(|e| e.to_string())?;
+    *state.session_workspace.write().unwrap() = Some(info.clone());
+    let _ = state.db.record_recent_workspace(&info.path);
+    let _ = app.emit("factory-updated", ());
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn save_app_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    state
+        .db
+        .save_settings(&settings)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("factory-updated", ());
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -62,23 +142,52 @@ pub async fn create_agent_tab(
     state: State<'_, AppState>,
     req: CreateTabRequest,
 ) -> Result<AgentTab, String> {
-    let slug = sanitize_slug(&req.slug);
-    if slug.is_empty() {
-        return Err("Feature slug cannot be empty".to_string());
-    }
+    let settings = state.db.load_settings();
+    let ws = state.workspace();
 
-    let repo_path = PathBuf::from(&req.repo_path);
+    let cli = req.cli.unwrap_or(settings.default_cli);
+    let repo_str = req
+        .repo_path
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| ws.as_ref().map(|w| w.path.clone()))
+        .ok_or_else(|| "No session workspace selected".to_string())?;
+
+    let repo_path = PathBuf::from(&repo_str);
     if !repo_path.exists() {
-        return Err(format!("Repository path does not exist: {}", req.repo_path));
+        return Err(format!("Repository path does not exist: {repo_str}"));
     }
 
-    let base_branch = if req.base_branch.trim().is_empty() {
-        detect_default_branch(&repo_path).await
-    } else {
-        req.base_branch.trim().to_string()
+    let raw_slug = req
+        .slug
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("agent-{}", &Uuid::new_v4().to_string()[..6]));
+    let mut slug = sanitize_slug(&raw_slug);
+    if slug.is_empty() {
+        slug = format!("agent-{}", &Uuid::new_v4().to_string()[..6]);
+    }
+    // Guarantee uniqueness if the same slug was used before
+    if state
+        .db
+        .get_tab_by_feature_id(&slug)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        slug = format!("{slug}-{}", &Uuid::new_v4().to_string()[..4]);
+    }
+
+    let base_branch = match req.base_branch.filter(|s| !s.trim().is_empty()) {
+        Some(b) => b,
+        None => detect_default_branch(&repo_path).await,
     };
 
-    let (worktree_path, branch_name) = if req.skip_worktree {
+    let is_git = ws
+        .as_ref()
+        .filter(|w| w.path == repo_str)
+        .map(|w| w.is_git_repo)
+        .unwrap_or_else(|| repo_path.join(".git").exists());
+
+    let (worktree_path, branch_name) = if req.skip_worktree || !is_git {
         (repo_path.clone(), base_branch.clone())
     } else {
         create_worktree(&repo_path, &slug, &base_branch)
@@ -95,7 +204,7 @@ pub async fn create_agent_tab(
         id: Uuid::new_v4().to_string(),
         feature_id: slug.clone(),
         slug: slug.clone(),
-        cli: req.cli.clone(),
+        cli: cli.clone(),
         repo_path: repo_path.to_string_lossy().to_string(),
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch_name,
@@ -104,6 +213,7 @@ pub async fn create_agent_tab(
         initial_prompt: req.initial_prompt.clone(),
         ping_message: None,
         ping_urgency: None,
+        issue_id: req.issue_id.clone(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -122,12 +232,145 @@ pub async fn create_agent_tab(
                 mcp_port: port,
                 mcp_config_path: mcp_config_path.as_deref(),
                 cli: &tab.cli,
+                permission: &settings.default_permission,
                 initial_prompt: &tab.initial_prompt,
                 cols: 120,
                 rows: 32,
             },
         )
         .map_err(|e| e.to_string())?;
+
+    let _ = app.emit("factory-updated", ());
+    Ok(tab)
+}
+
+#[tauri::command]
+pub async fn create_issue_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    req: CreateIssueRequest,
+) -> Result<Issue, String> {
+    let ws_path = state
+        .workspace()
+        .map(|w| w.path)
+        .ok_or_else(|| "Select a workspace first".to_string())?;
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err("Issue title cannot be empty".to_string());
+    }
+    let issue = state
+        .db
+        .create_issue(
+            &ws_path,
+            title,
+            req.spec.trim(),
+            req.priority.unwrap_or(IssuePriority::Medium),
+            req.labels,
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("factory-updated", ());
+    Ok(issue)
+}
+
+#[tauri::command]
+pub fn update_issue_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    req: UpdateIssueRequest,
+) -> Result<Issue, String> {
+    let author = req.author.as_deref().unwrap_or("operator");
+    let updated = state
+        .db
+        .update_issue(
+            &req.issue_id,
+            req.title.as_deref(),
+            req.spec.as_deref(),
+            req.status,
+            req.priority,
+            req.labels,
+            None,
+            req.branch_name.as_deref(),
+            req.comment.as_deref().map(|c| (author, c)),
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("factory-updated", ());
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn delete_issue_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> Result<(), String> {
+    state.db.delete_issue(&issue_id).map_err(|e| e.to_string())?;
+    let _ = app.emit("factory-updated", ());
+    Ok(())
+}
+
+/// 1-click spawn from an Issue: uses the global default CLI + session workspace,
+/// lets the AI pick/refine the feature branch name, and links the issue to the new tab.
+#[tauri::command]
+pub async fn spawn_agent_for_issue(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> Result<AgentTab, String> {
+    let issue = state
+        .db
+        .get_issue(&issue_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Issue not found".to_string())?;
+
+    let title_slug = sanitize_slug(&issue.title);
+    let short_slug: String = title_slug.chars().take(28).collect();
+    let slug = format!(
+        "issue-{}-{}",
+        issue.number,
+        short_slug.trim_matches('-')
+    );
+
+    let prompt = format!(
+        "Work on Issue #{num}: {title}. Spec: {spec}. You may rename this feature branch (git branch -m agent/<your-name>) if a cleaner name fits, and call MCP update_issue(issue_id='{id}', status='InProgress', branch_name='<branch>', comment='...') as you make progress. Submit a 5-subtab HTML changelog via submit_changelog when complete.",
+        num = issue.number,
+        title = issue.title,
+        spec = issue.spec.replace('\n', " "),
+        id = issue.id,
+    );
+
+    let tab = create_agent_tab(
+        app.clone(),
+        state.clone(),
+        CreateTabRequest {
+            cli: None, // uses global default_cli
+            repo_path: Some(issue.workspace_path.clone()),
+            base_branch: None,
+            slug: Some(slug),
+            initial_prompt: prompt,
+            skip_worktree: false,
+            issue_id: Some(issue.id.clone()),
+        },
+    )
+    .await?;
+
+    let _ = state.db.update_issue(
+        &issue.id,
+        None,
+        None,
+        Some(IssueStatus::InProgress),
+        None,
+        None,
+        Some(&tab.id),
+        Some(&tab.branch_name),
+        Some((
+            "grex",
+            &format!(
+                "Spawned {} agent on branch {}",
+                tab.cli.as_str(),
+                tab.branch_name
+            ),
+        )),
+    );
 
     let _ = app.emit("factory-updated", ());
     Ok(tab)
@@ -168,6 +411,7 @@ pub async fn ensure_pty_running(
                 mcp_port: state.port(),
                 mcp_config_path: mcp_cfg_opt,
                 cli: &AgentCli::Shell,
+                permission: &AgentPermission::Default,
                 initial_prompt: "",
                 cols: 120,
                 rows: 32,
@@ -244,7 +488,29 @@ pub async fn request_changes(
         .update_tab_state(&review.tab_id, AgentState::Working)
         .map_err(|e| e.to_string())?;
 
-    // Pipe reviewer feedback directly into the tab's PTY master Write handle
+    if let Some(tab) = state
+        .db
+        .get_tab_by_id(&review.tab_id)
+        .map_err(|e| e.to_string())?
+    {
+        if let Some(ref issue_id) = tab.issue_id {
+            let _ = state.db.update_issue(
+                issue_id,
+                None,
+                None,
+                Some(IssueStatus::InProgress),
+                None,
+                None,
+                None,
+                None,
+                Some((
+                    "reviewer",
+                    &format!("Requested changes on Iteration #{}: {}", review.iteration, feedback.trim()),
+                )),
+            );
+        }
+    }
+
     let instruction = format!(
         "\r\n# [GREX REVIEW FEEDBACK — Iteration #{}]\r\nPlease apply the following requested changes, re-verify tests/UI, regenerate your 5-subtab HTML changelog, and re-call submit_changelog:\r\n{}\r\n",
         review.iteration,
@@ -298,6 +564,23 @@ pub async fn approve_changelog(
         .db
         .update_tab_state(&tab.id, AgentState::Approved)
         .map_err(|e| e.to_string())?;
+
+    if let Some(ref issue_id) = tab.issue_id {
+        let _ = state.db.update_issue(
+            issue_id,
+            None,
+            None,
+            Some(IssueStatus::Done),
+            None,
+            None,
+            None,
+            Some(&tab.branch_name),
+            Some((
+                "reviewer",
+                &format!("Approved and merged {} into {}.", tab.branch_name, tab.base_branch),
+            )),
+        );
+    }
 
     let _ = app.emit("factory-updated", ());
     Ok(merge_output)
@@ -394,6 +677,7 @@ pub async fn submit_sample_changelog(
                 initial_prompt: "Implement OAuth 2.1 PKCE login flow".to_string(),
                 ping_message: None,
                 ping_urgency: None,
+                issue_id: None,
                 created_at: now.clone(),
                 updated_at: now,
             };
@@ -404,32 +688,12 @@ pub async fn submit_sample_changelog(
 
     let review = state
         .db
-        .enqueue_review(
-            &tab.id,
-            &tab.feature_id,
-            &sample_path.to_string_lossy(),
-        )
+        .enqueue_review(&tab.id, &tab.feature_id, &sample_path.to_string_lossy())
         .map_err(|e| e.to_string())?;
 
     let _ = app.emit("changelog-submitted", &review);
     let _ = app.emit("factory-updated", ());
     Ok(review)
-}
-
-fn sanitize_slug(raw: &str) -> String {
-    raw.trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
 }
 
 #[tauri::command]
@@ -552,6 +816,83 @@ pub fn sync_mcps_to_worktrees(state: State<'_, AppState>) -> Result<usize, Strin
     sync_active_worktrees(&state).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn export_full_config(state: State<'_, AppState>, dest_path: String) -> Result<String, String> {
+    let settings = state.db.load_settings();
+    let installed_mcps = crate::mcps::load_registry(&state.central_dir);
+    let mut central_files = std::collections::BTreeMap::new();
+
+    for rel in list_central_files(&state.central_dir) {
+        if rel == "grex-state.db"
+            || rel.ends_with(".db-wal")
+            || rel.ends_with(".db-shm")
+            || rel == "mcps.json"
+            || rel.starts_with(".samples/")
+            || rel.starts_with("mcps/")
+        {
+            continue;
+        }
+        if let Ok(full) = resolve_safe_central_path(&state.central_dir, &rel) {
+            if let Ok(text) = std::fs::read_to_string(&full) {
+                central_files.insert(rel, text);
+            }
+        }
+    }
+
+    let bundle = GrexConfigBundle {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        exported_at: Utc::now().to_rfc3339(),
+        settings,
+        installed_mcps,
+        central_files,
+    };
+
+    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    atomic_write(Path::new(&dest_path), &json).map_err(|e| e.to_string())?;
+    Ok(dest_path)
+}
+
+#[tauri::command]
+pub fn import_full_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    src_path: String,
+) -> Result<String, String> {
+    let raw = std::fs::read_to_string(&src_path).map_err(|e| format!("Failed to read {src_path}: {e}"))?;
+    let bundle: GrexConfigBundle =
+        serde_json::from_str(&raw).map_err(|e| format!("Invalid Grex config bundle: {e}"))?;
+
+    state
+        .db
+        .save_settings(&bundle.settings)
+        .map_err(|e| e.to_string())?;
+    crate::mcps::save_registry(&state.central_dir, &bundle.installed_mcps)
+        .map_err(|e| e.to_string())?;
+
+    let mut files_restored = 0usize;
+    for (rel, content) in &bundle.central_files {
+        if update_central_file(
+            &state.central_dir,
+            rel,
+            content,
+            Some(&format!("Import central config: {rel}")),
+        )
+        .is_ok()
+        {
+            files_restored += 1;
+        }
+    }
+
+    let _ = sync_active_worktrees(&state);
+    let _ = app.emit("factory-updated", ());
+
+    Ok(format!(
+        "Imported settings, {} MCP(s), and {} central file(s)",
+        bundle.installed_mcps.len(),
+        files_restored
+    ))
+}
+
 fn sync_active_worktrees(state: &AppState) -> anyhow::Result<usize> {
     let tabs = state.db.list_tabs()?;
     let port = state.port();
@@ -567,4 +908,29 @@ fn sync_active_worktrees(state: &AppState) -> anyhow::Result<usize> {
         }
     }
     Ok(synced)
+}
+
+pub fn strip_windows_verbatim_prefix(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+fn sanitize_slug(raw: &str) -> String {
+    raw.trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }

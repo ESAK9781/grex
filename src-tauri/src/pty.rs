@@ -1,15 +1,20 @@
-use crate::models::{AgentCli, PtyOutputPayload};
+use crate::commands::AppState;
+use crate::models::{AgentCli, AgentPermission, AgentState, PtyOutputPayload};
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
+    last_activity: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Default)]
@@ -25,9 +30,17 @@ pub struct SpawnPtyOptions<'a> {
     pub mcp_port: u16,
     pub mcp_config_path: Option<&'a Path>,
     pub cli: &'a AgentCli,
+    pub permission: &'a AgentPermission,
     pub initial_prompt: &'a str,
     pub cols: u16,
     pub rows: u16,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl PtyManager {
@@ -50,7 +63,6 @@ impl PtyManager {
         let mut cmd = CommandBuilder::new(&shell_program);
         cmd.cwd(opts.worktree_path);
 
-        // Inject Grex factory environment variables
         cmd.env("AGENT_FEATURE_ID", opts.feature_id);
         cmd.env("FACTORY_MCP_PORT", opts.mcp_port.to_string());
         cmd.env(
@@ -65,6 +77,7 @@ impl PtyManager {
             "GREX_WORKTREE_PATH",
             opts.worktree_path.to_string_lossy().to_string(),
         );
+        cmd.env("GREX_PERMISSION_MODE", opts.permission.as_str());
         cmd.env("TERM", "xterm-256color");
 
         let _child = pair
@@ -79,16 +92,21 @@ impl PtyManager {
             .context("clone PTY reader")?;
         let mut writer = pair.master.take_writer().context("take PTY writer")?;
 
-        // Auto-launch CLI startup command + initial prompt if configured
-        if let Some(launch_cmd) =
-            build_cli_launch_command(opts.cli, opts.mcp_config_path, opts.initial_prompt)
-        {
+        if let Some(launch_cmd) = build_cli_launch_command(
+            opts.cli,
+            opts.permission,
+            opts.mcp_config_path,
+            opts.initial_prompt,
+        ) {
             let line = format!("{launch_cmd}\r\n");
             let _ = writer.write_all(line.as_bytes());
             let _ = writer.flush();
         }
 
         let tab_id_owned = opts.tab_id.to_string();
+        let feature_id_owned = opts.feature_id.to_string();
+        let last_activity = Arc::new(AtomicU64::new(now_secs()));
+
         {
             let mut guard = self.sessions.lock().unwrap();
             guard.insert(
@@ -96,9 +114,54 @@ impl PtyManager {
                 PtySession {
                     master: pair.master,
                     writer,
+                    last_activity: last_activity.clone(),
                 },
             );
         }
+
+        // Background idle/inactivity monitor for this PTY
+        let idle_app = app.clone();
+        let idle_tab_id = tab_id_owned.clone();
+        let idle_feature = feature_id_owned.clone();
+        let idle_last = last_activity.clone();
+        let idle_sessions = self.sessions.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut marked_inactive = false;
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if !idle_sessions.lock().unwrap().contains_key(&idle_tab_id) {
+                    break;
+                }
+                let Some(st) = idle_app.try_state::<AppState>() else {
+                    break;
+                };
+                let settings = st.db.load_settings();
+                let timeout = settings.inactive_timeout_secs.max(10);
+                let elapsed = now_secs().saturating_sub(idle_last.load(Ordering::Relaxed));
+
+                if elapsed >= timeout {
+                    if !marked_inactive {
+                        if let Ok(Some(tab)) = st.db.get_tab_by_id(&idle_tab_id) {
+                            if tab.state == AgentState::Working {
+                                let _ = st.db.update_tab_state(&idle_tab_id, AgentState::Inactive);
+                                let _ = idle_app.emit("factory-updated", ());
+                                if settings.notify_on_inactive {
+                                    let _ = idle_app
+                                        .notification()
+                                        .builder()
+                                        .title(&format!("Grex Agent Inactive: {idle_feature}"))
+                                        .body("Agent has stopped producing output and may be waiting for input.")
+                                        .show();
+                                }
+                                marked_inactive = true;
+                            }
+                        }
+                    }
+                } else {
+                    marked_inactive = false;
+                }
+            }
+        });
 
         // Stream PTY output asynchronously to xterm.js via Tauri events
         let sessions_ref = self.sessions.clone();
@@ -108,6 +171,15 @@ impl PtyManager {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        last_activity.store(now_secs(), Ordering::Relaxed);
+                        if let Some(st) = app.try_state::<AppState>() {
+                            if let Ok(Some(tab)) = st.db.get_tab_by_id(&tab_id_owned) {
+                                if tab.state == AgentState::Inactive {
+                                    let _ = st.db.update_tab_state(&tab_id_owned, AgentState::Working);
+                                    let _ = app.emit("factory-updated", ());
+                                }
+                            }
+                        }
                         let text = String::from_utf8_lossy(&buf[..n]).to_string();
                         let _ = app.emit(
                             "pty-output",
@@ -118,6 +190,23 @@ impl PtyManager {
                         );
                     }
                     Err(_) => break,
+                }
+            }
+            if let Some(st) = app.try_state::<AppState>() {
+                if let Ok(Some(tab)) = st.db.get_tab_by_id(&tab_id_owned) {
+                    if tab.state == AgentState::Working {
+                        let _ = st.db.update_tab_state(&tab_id_owned, AgentState::Inactive);
+                        let _ = app.emit("factory-updated", ());
+                        let settings = st.db.load_settings();
+                        if settings.notify_on_inactive {
+                            let _ = app
+                                .notification()
+                                .builder()
+                                .title(&format!("Grex Agent Inactive: {feature_id_owned}"))
+                                .body("Agent shell exited.")
+                                .show();
+                        }
+                    }
                 }
             }
             let _ = app.emit("pty-closed", tab_id_owned.clone());
@@ -132,6 +221,7 @@ impl PtyManager {
         let session = guard
             .get_mut(tab_id)
             .ok_or_else(|| anyhow!("No active PTY session for tab {tab_id}"))?;
+        session.last_activity.store(now_secs(), Ordering::Relaxed);
         session.writer.write_all(data.as_bytes())?;
         session.writer.flush()?;
         Ok(())
@@ -179,6 +269,7 @@ fn default_shell() -> String {
 
 fn build_cli_launch_command(
     cli: &AgentCli,
+    permission: &AgentPermission,
     mcp_config_path: Option<&Path>,
     initial_prompt: &str,
 ) -> Option<String> {
@@ -191,24 +282,54 @@ fn build_cli_launch_command(
     match cli {
         AgentCli::Shell => None,
         AgentCli::Claude => {
+            let perm_flag = match permission {
+                AgentPermission::Default => "",
+                AgentPermission::Auto => "--permission-mode acceptEdits",
+                AgentPermission::DangerouslySkip => "--dangerously-skip-permissions",
+            };
+            let parts = ["claude", perm_flag, &mcp_flag]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
             if prompt_trimmed.is_empty() {
-                Some(format!("claude {mcp_flag}").trim().to_string())
+                Some(parts)
             } else {
-                Some(format!("claude {mcp_flag} \"{escaped_prompt}\""))
+                Some(format!("{parts} \"{escaped_prompt}\""))
             }
         }
         AgentCli::Codex => {
+            let perm_flag = match permission {
+                AgentPermission::Default => "",
+                AgentPermission::Auto => "--full-auto",
+                AgentPermission::DangerouslySkip => "--dangerously-bypass-approvals-and-sandbox",
+            };
+            let parts = ["codex", perm_flag]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
             if prompt_trimmed.is_empty() {
-                Some("codex".to_string())
+                Some(parts)
             } else {
-                Some(format!("codex \"{escaped_prompt}\""))
+                Some(format!("{parts} \"{escaped_prompt}\""))
             }
         }
         AgentCli::Antigravity => {
+            let perm_flag = match permission {
+                AgentPermission::Default => "",
+                AgentPermission::Auto => "--auto",
+                AgentPermission::DangerouslySkip => "--yolo",
+            };
+            let parts = ["agy", perm_flag]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
             if prompt_trimmed.is_empty() {
-                Some("agy".to_string())
+                Some(parts)
             } else {
-                Some(format!("agy \"{escaped_prompt}\""))
+                Some(format!("{parts} \"{escaped_prompt}\""))
             }
         }
     }
