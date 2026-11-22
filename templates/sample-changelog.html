@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grex Sample Changelog — feat-oauth-pkce</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --panel: #121722;
+      --border: #232b3a;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #f97316;
+      --green: #22c55e;
+      --blue: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    header {
+      padding: 18px 24px 12px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #141a26 0%, #0f131c 100%);
+    }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(249, 115, 22, 0.16);
+      color: var(--accent);
+      border: 1px solid rgba(249, 115, 22, 0.35);
+    }
+    h1 { margin: 8px 0 4px; font-size: 20px; }
+    .meta { color: var(--muted); font-size: 13px; }
+    nav {
+      display: flex;
+      gap: 6px;
+      padding: 10px 24px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+    }
+    nav button {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      padding: 7px 14px;
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+    }
+    nav button:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    nav button.active {
+      color: var(--text);
+      background: rgba(249, 115, 22, 0.14);
+      border-color: rgba(249, 115, 22, 0.45);
+    }
+    main { padding: 24px; max-width: 960px; }
+    section[data-tab] { display: none; }
+    section[data-tab].active { display: block; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+    .pill-pass {
+      color: var(--green);
+      background: rgba(34, 197, 94, 0.12);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    pre {
+      background: #080b10;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      overflow-x: auto;
+      font-size: 12.5px;
+      color: #cbd5e1;
+    }
+    .mock-shot {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      background: #090d14;
+      font-size: 12px;
+    }
+    .mock-bar { display: flex; gap: 6px; margin-bottom: 10px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #334155; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="badge">5-Subtab Contract Verified</span>
+    <h1>feat-oauth-pkce — OAuth 2.1 PKCE Login Flow</h1>
+    <div class="meta">Branch: <code>agent/feat-oauth-pkce</code> &middot; Iteration #1 &middot; Submitted via Grex MCP</div>
+  </header>
+
+  <nav>
+    <button data-tab-btn="summary" class="active">1. Summary</button>
+    <button data-tab-btn="architecture">2. Architecture</button>
+    <button data-tab-btn="ui-before-after">3. UI Before/After</button>
+    <button data-tab-btn="user-stories">4. User Stories</button>
+    <button data-tab-btn="test-verification">5. Test Verification</button>
+  </nav>
+
+  <main>
+    <section data-tab="summary" class="active">
+      <div class="card">
+        <h2>Summary</h2>
+        <p>Implemented full OAuth 2.1 Authorization Code + PKCE flow with automatic token rotation, secure OS keychain storage, and graceful offline fallback.</p>
+        <ul>
+          <li>Added S256 code verifier / challenge generator in <code>src/auth/pkce.rs</code>.</li>
+          <li>Wired local callback listener on ephemeral port with 120s timeout.</li>
+          <li>Zero breaking changes to existing API token sessions.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section data-tab="architecture">
+      <div class="card">
+        <h2>Architecture</h2>
+        <pre>Browser &lt;--(S256 PKCE)--&gt; IdP Authorize
+   |
+   v  (127.0.0.1:&lt;ephemeral&gt;/callback)
+Local Callback Listener --&gt; Token Exchange --&gt; Encrypted Session Store</pre>
+        <p>All crypto primitives use constant-time comparisons and ephemeral state nonces to prevent CSRF and replay attacks.</p>
+      </div>
+    </section>
+
+    <section data-tab="ui-before-after">
+      <h2>UI Before / After</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Before</h3>
+          <div class="mock-shot">
+            <div class="mock-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+            <p style="color:#94a3b8;">Manual API key paste field only. No SSO or session expiry indicator.</p>
+          </div>
+        </div>
+        <div class="card">
+          <h3>After</h3>
+          <div class="mock-shot" style="border-color: rgba(249,115,22,0.5);">
+            <div class="mock-bar"><span class="dot" style="background:#ef4444"></span><span class="dot" style="background:#f59e0b"></span><span class="dot" style="background:#22c55e"></span></div>
+            <p style="color:#e6edf3;"><strong>Sign in with Browser (PKCE)</strong> button + live token expiry pill + automatic silent refresh.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section data-tab="user-stories">
+      <div class="card">
+        <h2>User Stories &amp; Verification</h2>
+        <p><span class="pill-pass">VERIFIED</span> <strong>US-1:</strong> As a developer, I can authenticate via browser without copying static API keys.</p>
+        <p><span class="pill-pass">VERIFIED</span> <strong>US-2:</strong> As a developer, expired access tokens refresh transparently without interrupting active agent sessions.</p>
+      </div>
+    </section>
+
+    <section data-tab="test-verification">
+      <div class="card">
+        <h2>Test Verification</h2>
+        <pre>running 14 tests
+test auth::pkce::tests::generates_valid_s256_challenge ... ok
+test auth::pkce::tests::rejects_mismatched_state_nonce ... ok
+test auth::callback::tests::handles_ephemeral_port_bind ... ok
+test auth::session::tests::rotates_refresh_token_atomically ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; finished in 0.18s</pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    document.querySelectorAll('[data-tab-btn]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const target = btn.getAttribute('data-tab-btn');
+        document.querySelectorAll('[data-tab-btn]').forEach((b) => {
+          b.classList.toggle('active', b.getAttribute('data-tab-btn') === target);
+        });
+        document.querySelectorAll('section[data-tab]').forEach((s) => {
+          s.classList.toggle('active', s.getAttribute('data-tab') === target);
+        });
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grex — Local Rust Agent Software Factory</title>
+  <meta name="description" content="Run dozens of coding agents concurrently in isolated Git worktrees with native Rust PTYs, an embedded Axum MCP server, SQLite review queues, and 5-subtab HTML changelogs." />
+  <style>
+    :root {
+      --bg: #07090d;
+      --surface: #0f131c;
+      --surface-2: #151b27;
+      --border: #232c3d;
+      --text: #edf2f7;
+      --muted: #8b97ad;
+      --accent: #f97316;
+      --accent-2: #fb923c;
+      --green: #22c55e;
+      --blue: #38bdf8;
+      --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      background:
+        radial-gradient(900px 420px at 50% -80px, rgba(249, 115, 22, 0.16), transparent 65%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    a { color: inherit; text-decoration: none; }
+    .container { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+    /* Nav */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(12px);
+      background: rgba(7, 9, 13, 0.8);
+      border-bottom: 1px solid rgba(35, 44, 61, 0.7);
+    }
+    .nav-inner {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+    .logo-mark {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+      color: #090b10;
+      font-family: var(--mono);
+      font-size: 14px;
+      display: grid;
+      place-items: center;
+    }
+    .nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; color: var(--muted); }
+    .nav-links a:hover { color: var(--text); }
+
+    /* Hero */
+    .hero { padding: 72px 0 48px; text-align: center; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent-2);
+      background: rgba(249, 115, 22, 0.12);
+      border: 1px solid rgba(249, 115, 22, 0.35);
+      padding: 4px 12px;
+      border-radius: 999px;
+      margin-bottom: 18px;
+    }
+    h1 {
+      margin: 0 auto 18px;
+      max-width: 820px;
+      font-size: clamp(34px, 5vw, 58px);
+      line-height: 1.08;
+      letter-spacing: -0.035em;
+    }
+    .gradient {
+      background: linear-gradient(90deg, #fff 20%, #fb923c 80%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .lead {
+      max-width: 680px;
+      margin: 0 auto 30px;
+      font-size: 17px;
+      color: var(--muted);
+    }
+    .cta-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; margin-bottom: 36px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 20px;
+      border-radius: 9px;
+      font-weight: 600;
+      font-size: 14px;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      transition: all 0.15s ease;
+    }
+    .btn:hover { border-color: #425270; transform: translateY(-1px); }
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent-2);
+      color: #090b10;
+    }
+    .btn-primary:hover { background: var(--accent-2); }
+
+    /* Install Box */
+    .install-card {
+      max-width: 760px;
+      margin: 0 auto 56px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      text-align: left;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+    }
+    .install-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 10px 14px;
+      background: #0b0f17;
+      border-bottom: 1px solid var(--border);
+    }
+    .install-tabs button {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      padding: 5px 12px;
+      border-radius: 7px;
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .install-tabs button.active {
+      color: var(--text);
+      background: rgba(249, 115, 22, 0.14);
+      border-color: rgba(249, 115, 22, 0.4);
+    }
+    .install-cmd {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px;
+      font-family: var(--mono);
+      font-size: 13.5px;
+      color: #e2e8f0;
+      overflow-x: auto;
+    }
+    .copy-btn {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 7px;
+      font-family: var(--mono);
+      font-size: 12px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { border-color: var(--accent); color: var(--accent-2); }
+
+    /* Mockup Preview */
+    .mockup {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      margin-bottom: 72px;
+      box-shadow: 0 32px 90px rgba(0, 0, 0, 0.6);
+    }
+    .mockup-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 16px;
+      background: #0b0e15;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .dots { display: flex; gap: 6px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .mockup-grid {
+      display: grid;
+      grid-template-columns: 220px 1fr 1fr;
+      min-height: 310px;
+      text-align: left;
+    }
+    @media (max-width: 860px) {
+      .mockup-grid { grid-template-columns: 1fr; }
+    }
+    .mock-col { padding: 14px; border-right: 1px solid var(--border); font-size: 12.5px; }
+    .mock-col:last-child { border-right: none; }
+    .mock-item {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      margin-bottom: 8px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+    }
+    .mock-item.active { border-color: var(--accent); background: rgba(249, 115, 22, 0.09); }
+    .mock-term {
+      background: #06080c;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #cbd5e1;
+      line-height: 1.65;
+    }
+    .pill {
+      display: inline-block;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      margin-left: 6px;
+      font-weight: 600;
+    }
+    .pill-orange { background: rgba(249, 115, 22, 0.18); color: var(--accent-2); }
+    .pill-green { background: rgba(34, 197, 94, 0.16); color: #86efac; }
+    .pill-blue { background: rgba(56, 189, 248, 0.16); color: var(--blue); }
+
+    /* Sections */
+    section { padding: 56px 0; border-top: 1px solid rgba(35, 44, 61, 0.55); }
+    .section-title { font-size: 28px; letter-spacing: -0.025em; margin: 0 0 10px; }
+    .section-sub { color: var(--muted); margin: 0 0 32px; max-width: 680px; }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+      gap: 18px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 16px; }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; }
+    .card code {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent-2);
+      background: rgba(249, 115, 22, 0.1);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      font-size: 13.5px;
+    }
+    th, td {
+      text-align: left;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    th { background: #0c1018; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+    td code { font-family: var(--mono); color: var(--accent-2); font-size: 12.5px; }
+
+    footer {
+      padding: 36px 0 48px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 13.5px;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container nav-inner">
+      <a class="logo" href="#">
+        <span class="logo-mark">GX</span>
+        <span>Grex</span>
+      </a>
+      <div class="nav-links">
+        <a href="#install">Install</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#mcp">MCP Tools</a>
+        <a href="https://github.com/ESAK9781/grex/releases">Releases</a>
+        <a href="https://github.com/ESAK9781/grex">GitHub &rarr;</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container">
+    <div class="hero">
+      <div class="eyebrow">Rust + Tauri v2 + portable-pty + Embedded Axum MCP</div>
+      <h1>The <span class="gradient">Local Software Factory</span> for Concurrent Coding Agents</h1>
+      <p class="lead">
+        Spawn dozens of Claude Code, Codex, or Antigravity agents in isolated Git worktrees with real native PTYs,
+        an embedded Rust MCP server, SQLite review queues, and 5-subtab HTML changelog reviews.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/ESAK9781/grex/releases/latest">Download Latest Release</a>
+        <a class="btn" href="https://github.com/ESAK9781/grex">View Source on GitHub</a>
+      </div>
+
+      <div id="install" class="install-card">
+        <div class="install-tabs">
+          <button class="active" data-os="windows">Windows (PowerShell)</button>
+          <button data-os="unix">macOS / Linux</button>
+          <button data-os="source">Build from Source</button>
+        </div>
+        <div class="install-cmd">
+          <code id="cmd-text">irm https://esak9781.github.io/grex/install.ps1 | iex</code>
+          <button class="copy-btn" id="copy-btn">Copy</button>
+        </div>
+        <div style="padding:10px 20px 14px;border-top:1px solid var(--border);font-size:12px;color:var(--muted);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <span>Installs <code>grex</code> &amp; <code>grex-mcp</code> to PATH + creates Desktop &amp; Start Menu shortcuts.</span>
+          <a href="https://esak9781.github.io/grex/install.ps1" style="color:var(--accent-2);">View install.ps1 &rarr;</a>
+        </div>
+      </div>
+
+      <div class="mockup">
+        <div class="mockup-bar">
+          <div class="dots">
+            <span class="dot" style="background:#ef4444"></span>
+            <span class="dot" style="background:#eab308"></span>
+            <span class="dot" style="background:#22c55e"></span>
+          </div>
+          <span>Grex v0.1.0 &middot; MCP 127.0.0.1:4739 &middot; ~/.agent-factory</span>
+          <span>SQLite WAL</span>
+        </div>
+        <div class="mockup-grid">
+          <div class="mock-col">
+            <div style="color:var(--muted);font-size:11px;text-transform:uppercase;margin-bottom:8px;">Active Worktrees</div>
+            <div class="mock-item active">feat-oauth-pkce <span class="pill pill-orange">NeedsReview</span></div>
+            <div class="mock-item">feat-pty-resize <span class="pill pill-blue">Working</span></div>
+            <div class="mock-item">fix-sqlite-wal <span class="pill pill-green">Approved</span></div>
+          </div>
+          <div class="mock-col mock-term">
+            <div style="color:var(--accent-2);">[grex] attached to feat-oauth-pkce (agent/feat-oauth-pkce)</div>
+            <div style="color:#64748b;">worktree: .worktrees/feat-oauth-pkce</div>
+            <br />
+            <div>$ claude --mcp-config .grex-mcp.json</div>
+            <div style="color:#86efac;">&#10003; get_factory_state() &rarr; 0 file conflicts</div>
+            <div style="color:#86efac;">&#10003; cargo test &rarr; 14 passed, 0 failed</div>
+            <div style="color:#fb923c;">&#9656; submit_changelog(feat-oauth-pkce, .grex/changelog.html)</div>
+            <div style="color:#94a3b8;">&rarr; Validated 5 subtabs &middot; Queued Iteration #1</div>
+          </div>
+          <div class="mock-col">
+            <div style="color:var(--muted);font-size:11px;text-transform:uppercase;margin-bottom:8px;">5-Subtab Changelog Reviewer</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px;">
+              <span class="pill pill-orange">1. Summary</span>
+              <span class="pill pill-blue">2. Architecture</span>
+              <span class="pill pill-blue">3. UI Before/After</span>
+              <span class="pill pill-blue">4. User Stories</span>
+              <span class="pill pill-green">5. Test Verification</span>
+            </div>
+            <p style="color:var(--muted);font-size:12px;margin:0 0 12px;">
+              Sandboxed <code>asset://</code> iframe renders embedded base64 or relative Playwright screenshots.
+            </p>
+            <div style="display:flex;gap:8px;">
+              <span class="btn" style="padding:5px 10px;font-size:11.5px;">Request Changes &rarr; PTY</span>
+              <span class="btn btn-primary" style="padding:5px 10px;font-size:11.5px;background:#16a34a;border-color:#22c55e;color:#fff;">Approve &amp; Merge</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <section id="architecture">
+      <h2 class="section-title">Engineered in Rust for Zero-Overhead Concurrency</h2>
+      <p class="section-sub">Single-binary desktop distribution with native OS pseudo-terminals, SQLite persistence, and Git worktree isolation.</p>
+      <div class="grid-3">
+        <div class="card">
+          <h3>Native PTYs via portable-pty</h3>
+          <p>Spawns real ConPTY (Windows) or openpty (macOS/Linux) sessions per tab, streaming bytes asynchronously over Tauri events directly into <code>xterm.js</code>.</p>
+        </div>
+        <div class="card">
+          <h3>Isolated Git Worktrees</h3>
+          <p>Automatically runs <code>git worktree add .worktrees/&lt;slug&gt; -b agent/&lt;slug&gt;</code>, symlinks central <code>AGENTS.md</code> + <code>.skills/</code>, and injects <code>AGENT_FEATURE_ID</code>.</p>
+        </div>
+        <div class="card">
+          <h3>5-Subtab HTML Contract</h3>
+          <p>Validates every agent submission using <code>scraper</code> for Summary, Architecture, UI Before/After, User Stories, and Test Verification before notifying you.</p>
+        </div>
+        <div class="card">
+          <h3>Direct PTY Feedback Loop</h3>
+          <p>Requesting changes writes reviewer instructions straight into the tab's PTY master handle. Approving runs <code>git merge --no-ff</code> and cleans up the worktree.</p>
+        </div>
+        <div class="card">
+          <h3>SQLite Queue Persistence</h3>
+          <p>Bundled <code>rusqlite</code> tracks every active tab, worktree path, state (<code>Working</code>, <code>NeedsReview</code>, <code>Blocked</code>, <code>Approved</code>), and review iteration.</p>
+        </div>
+        <div class="card">
+          <h3>Self-Improving Meta-Skills</h3>
+          <p>Central <code>~/.agent-factory/</code> ships with <code>worktree-workflow</code> and <code>factory-self-improve</code> skills backed by atomic writes and Git commit history.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="mcp">
+      <h2 class="section-title">Embedded Axum MCP Server &amp; Stdio Shim</h2>
+      <p class="section-sub">Every tab receives <code>FACTORY_MCP_PORT</code> and a generated <code>.grex-mcp.json</code> supporting both HTTP/SSE and the lightweight <code>grex-mcp</code> stdio shim binary.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>MCP Tool</th>
+            <th>Parameters</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>submit_changelog</code></td>
+            <td><code>feature_id, html_path</code></td>
+            <td>Validates all 5 HTML subtabs, enqueues into Active Review Queue, fires OS notification.</td>
+          </tr>
+          <tr>
+            <td><code>ping_user</code></td>
+            <td><code>message, urgency, feature_id?</code></td>
+            <td>Highlights the blocked agent tab in red and sends a native desktop alert.</td>
+          </tr>
+          <tr>
+            <td><code>get_factory_state</code></td>
+            <td><code>{}</code></td>
+            <td>Returns active worktrees, dev branch HEADs, and files touched by sibling agents.</td>
+          </tr>
+          <tr>
+            <td><code>update_central_instructions</code></td>
+            <td><code>target_file, content, commit_message?</code></td>
+            <td>Atomically updates <code>~/.agent-factory/AGENTS.md</code> or <code>.skills/</code> and commits to Git.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      <div>Grex &middot; MIT License &middot; Built with Rust &amp; Tauri v2</div>
+      <div>
+        <a href="https://github.com/ESAK9781/grex">GitHub</a> &middot;
+        <a href="https://github.com/ESAK9781/grex/releases">Releases</a>
+      </div>
+    </footer>
+  </main>
+
+  <script>
+    const COMMANDS = {
+      windows: "irm https://esak9781.github.io/grex/install.ps1 | iex",
+      unix: "curl -fsSL https://esak9781.github.io/grex/install.sh | sh",
+      source: "git clone https://github.com/ESAK9781/grex.git && cd grex && npm install && npm run tauri build"
+    };
+    const cmdEl = document.getElementById("cmd-text");
+    const copyBtn = document.getElementById("copy-btn");
+    document.querySelectorAll(".install-tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".install-tabs button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        cmdEl.textContent = COMMANDS[btn.dataset.os];
+        copyBtn.textContent = "Copy";
+      });
+    });
+    copyBtn.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(cmdEl.textContent);
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => (copyBtn.textContent = "Copy"), 1800);
+    });
+  </script>
+</body>
+</html>
