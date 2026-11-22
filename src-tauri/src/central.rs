@@ -2,6 +2,16 @@ use anyhow::{anyhow, Context, Result};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+fn hidden_cmd(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 const DEFAULT_AGENTS_MD: &str = include_str!("../../templates/agent-factory/AGENTS.md");
 const DEFAULT_WORKTREE_SKILL: &str =
     include_str!("../../templates/agent-factory/.skills/worktree-workflow/SKILL.md");
@@ -43,15 +53,15 @@ pub fn ensure_central_config(central_dir: &Path) -> Result<()> {
     }
 
     if !central_dir.join(".git").exists() {
-        let _ = Command::new("git")
+        let _ = hidden_cmd("git")
             .args(["init", "-q"])
             .current_dir(central_dir)
             .output();
-        let _ = Command::new("git")
+        let _ = hidden_cmd("git")
             .args(["config", "user.name", "Grex Factory"])
             .current_dir(central_dir)
             .output();
-        let _ = Command::new("git")
+        let _ = hidden_cmd("git")
             .args(["config", "user.email", "grex@local.factory"])
             .current_dir(central_dir)
             .output();
@@ -152,15 +162,15 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
 }
 
 fn git_commit_all(dir: &Path, message: &str) -> Result<String> {
-    let _ = Command::new("git")
+    let _ = hidden_cmd("git")
         .args(["add", "-A"])
         .current_dir(dir)
         .output()?;
-    let _ = Command::new("git")
+    let _ = hidden_cmd("git")
         .args(["commit", "-m", message, "--allow-empty"])
         .current_dir(dir)
         .output()?;
-    let rev = Command::new("git")
+    let rev = hidden_cmd("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(dir)
         .output()?;

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Grex",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "dev.grex.factory",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -18,7 +18,8 @@
         "minWidth": 1024,
         "minHeight": 680,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "backgroundColor": "#080a0f"
       }
     ],
     "security": {

@@ -40,6 +40,21 @@ export interface ReviewItem {
   reviewed_at: string | null;
 }
 
+export interface InstalledMcp {
+  id: string;
+  name: string;
+  source: string;
+  repo_url: string | null;
+  transport: string;
+  command: string;
+  args: string[];
+  url: string | null;
+  env: Record<string, string>;
+  enabled: boolean;
+  installed_path: string | null;
+  installed_at: string;
+}
+
 export interface BootstrapState {
   mcp_port: number;
   mcp_url: string;
@@ -47,6 +62,7 @@ export interface BootstrapState {
   tabs: AgentTab[];
   reviews: ReviewItem[];
   central_files: string[];
+  installed_mcps: InstalledMcp[];
 }
 
 export interface CreateTabRequest {

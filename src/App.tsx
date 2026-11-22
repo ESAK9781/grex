@@ -7,6 +7,7 @@ import {
   FileCode2,
   GitBranch,
   PanelLeft,
+  Plug,
   Plus,
   Search,
   Sparkles,
@@ -24,6 +25,7 @@ import { ChangelogViewer } from "./components/ChangelogViewer";
 import { NewTabModal } from "./components/NewTabModal";
 import { CentralConfigModal } from "./components/CentralConfigModal";
 import { CommandPalette } from "./components/CommandPalette";
+import { McpManagerModal } from "./components/McpManagerModal";
 
 export function App() {
   const [state, setState] = useState<BootstrapState | null>(null);
@@ -32,6 +34,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showNewTab, setShowNewTab] = useState(false);
   const [showCentral, setShowCentral] = useState(false);
+  const [showMcps, setShowMcps] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -95,6 +98,9 @@ export function App() {
       } else if (mod && e.key.toLowerCase() === "b") {
         e.preventDefault();
         setSidebarOpen((v) => !v);
+      } else if (mod && e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        setShowMcps((v) => !v);
       } else if (mod && e.key >= "1" && e.key <= "9") {
         const idx = Number(e.key) - 1;
         if (activeTabs[idx]) {
@@ -188,6 +194,20 @@ export function App() {
           >
             <span className="mcp-dot" />
             127.0.0.1:{state?.mcp_port ?? "4739"}
+          </button>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowMcps(true)}
+            title="Install & Manage GitHub MCPs (Ctrl+M)"
+          >
+            <Plug size={13} />
+            MCPs
+            {(state?.installed_mcps?.filter((m) => m.enabled).length ?? 0) >
+              0 && (
+              <span className="count-badge alert">
+                {state?.installed_mcps.filter((m) => m.enabled).length}
+              </span>
+            )}
           </button>
           <button className="btn btn-ghost" onClick={handleLoadSample}>
             <Sparkles size={13} />
@@ -382,6 +402,9 @@ export function App() {
             <kbd>Ctrl+N</kbd> New Agent
           </span>
           <span>
+            <kbd>Ctrl+M</kbd> GitHub MCPs
+          </span>
+          <span>
             <kbd>Ctrl+B</kbd> Sidebar
           </span>
           <span>
@@ -405,6 +428,7 @@ export function App() {
           }}
           onNewTab={() => setShowNewTab(true)}
           onOpenCentral={() => setShowCentral(true)}
+          onOpenMcps={() => setShowMcps(true)}
           onLoadSample={handleLoadSample}
           onToggleSidebar={() => setSidebarOpen((v) => !v)}
         />
@@ -423,6 +447,17 @@ export function App() {
           files={state.central_files}
           onClose={() => setShowCentral(false)}
           onSaved={(msg) => {
+            notify(msg);
+            refresh();
+          }}
+        />
+      )}
+
+      {showMcps && (
+        <McpManagerModal
+          mcps={state?.installed_mcps ?? []}
+          onClose={() => setShowMcps(false)}
+          onChanged={(msg) => {
             notify(msg);
             refresh();
           }}

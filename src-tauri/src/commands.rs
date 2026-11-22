@@ -37,6 +37,7 @@ pub async fn get_bootstrap_state(state: State<'_, AppState>) -> Result<Bootstrap
     let tabs = state.db.list_tabs().map_err(|e| e.to_string())?;
     let reviews = state.db.list_reviews().map_err(|e| e.to_string())?;
     let central_files = list_central_files(&state.central_dir);
+    let installed_mcps = crate::mcps::load_registry(&state.central_dir);
     let port = state.port();
 
     Ok(BootstrapState {
@@ -46,6 +47,7 @@ pub async fn get_bootstrap_state(state: State<'_, AppState>) -> Result<Bootstrap
         tabs,
         reviews,
         central_files,
+        installed_mcps,
     })
 }
 
@@ -428,4 +430,141 @@ fn sanitize_slug(raw: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+#[tauri::command]
+pub fn list_installed_mcps(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::mcps::InstalledMcp>, String> {
+    Ok(crate::mcps::load_registry(&state.central_dir))
+}
+
+#[tauri::command]
+pub async fn install_mcp_from_github(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    repo_url: String,
+    custom_id: Option<String>,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<crate::mcps::InstalledMcp, String> {
+    let installed = crate::mcps::install_from_github(
+        &state.central_dir,
+        &repo_url,
+        custom_id.as_deref(),
+        env,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let _ = sync_active_worktrees(&state);
+    let _ = app.emit("factory-updated", ());
+    Ok(installed)
+}
+
+#[tauri::command]
+pub fn add_custom_mcp(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    req: crate::mcps::AddCustomMcpRequest,
+) -> Result<Vec<crate::mcps::InstalledMcp>, String> {
+    let id = crate::mcps::sanitize_id(&req.id);
+    if id.is_empty() || id == "grex" {
+        return Err("Invalid or reserved MCP id".to_string());
+    }
+    let entry = crate::mcps::InstalledMcp {
+        id,
+        name: if req.name.trim().is_empty() {
+            req.id.clone()
+        } else {
+            req.name
+        },
+        source: req.source.unwrap_or_else(|| "custom".to_string()),
+        repo_url: req.repo_url,
+        transport: req.transport,
+        command: req.command,
+        args: req.args,
+        url: req.url,
+        env: req.env,
+        enabled: true,
+        installed_path: None,
+        installed_at: Utc::now().to_rfc3339(),
+    };
+    let list = crate::mcps::upsert_mcp(&state.central_dir, entry).map_err(|e| e.to_string())?;
+    let _ = sync_active_worktrees(&state);
+    let _ = app.emit("factory-updated", ());
+    Ok(list)
+}
+
+#[tauri::command]
+pub fn import_mcp_json_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    raw_json: String,
+) -> Result<Vec<crate::mcps::InstalledMcp>, String> {
+    let imported =
+        crate::mcps::import_mcp_json(&state.central_dir, &raw_json).map_err(|e| e.to_string())?;
+    let _ = sync_active_worktrees(&state);
+    let _ = app.emit("factory-updated", ());
+    Ok(imported)
+}
+
+#[tauri::command]
+pub fn toggle_mcp_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<Vec<crate::mcps::InstalledMcp>, String> {
+    let list =
+        crate::mcps::toggle_mcp(&state.central_dir, &id, enabled).map_err(|e| e.to_string())?;
+    let _ = sync_active_worktrees(&state);
+    let _ = app.emit("factory-updated", ());
+    Ok(list)
+}
+
+#[tauri::command]
+pub fn update_mcp_env_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<Vec<crate::mcps::InstalledMcp>, String> {
+    let list =
+        crate::mcps::update_mcp_env(&state.central_dir, &id, env).map_err(|e| e.to_string())?;
+    let _ = sync_active_worktrees(&state);
+    let _ = app.emit("factory-updated", ());
+    Ok(list)
+}
+
+#[tauri::command]
+pub fn remove_mcp_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<crate::mcps::InstalledMcp>, String> {
+    let list = crate::mcps::remove_mcp(&state.central_dir, &id).map_err(|e| e.to_string())?;
+    let _ = sync_active_worktrees(&state);
+    let _ = app.emit("factory-updated", ());
+    Ok(list)
+}
+
+#[tauri::command]
+pub fn sync_mcps_to_worktrees(state: State<'_, AppState>) -> Result<usize, String> {
+    sync_active_worktrees(&state).map_err(|e| e.to_string())
+}
+
+fn sync_active_worktrees(state: &AppState) -> anyhow::Result<usize> {
+    let tabs = state.db.list_tabs()?;
+    let port = state.port();
+    let mut synced = 0usize;
+    for tab in tabs {
+        if tab.state == AgentState::Archived {
+            continue;
+        }
+        let wt = PathBuf::from(&tab.worktree_path);
+        if wt.exists() {
+            let _ = inject_central_config(&wt, &state.central_dir, port, &tab.feature_id);
+            synced += 1;
+        }
+    }
+    Ok(synced)
 }

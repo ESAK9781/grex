@@ -27,6 +27,7 @@ interface CommandPaletteProps {
   onSelectReview: (review: ReviewItem) => void;
   onNewTab: () => void;
   onOpenCentral: () => void;
+  onOpenMcps: () => void;
   onLoadSample: () => void;
   onToggleSidebar: () => void;
 }
@@ -39,6 +40,7 @@ export function CommandPalette({
   onSelectReview,
   onNewTab,
   onOpenCentral,
+  onOpenMcps,
   onLoadSample,
   onToggleSidebar,
 }: CommandPaletteProps) {
@@ -61,6 +63,17 @@ export function CommandPalette({
         run: () => {
           onClose();
           onNewTab();
+        },
+      },
+      {
+        id: "github-mcps",
+        label: "Install & Manage GitHub MCP Servers",
+        hint: "Ctrl+M",
+        category: "Action",
+        icon: "plus",
+        run: () => {
+          onClose();
+          onOpenMcps();
         },
       },
       {
@@ -133,6 +146,7 @@ export function CommandPalette({
     onClose,
     onNewTab,
     onOpenCentral,
+    onOpenMcps,
     onLoadSample,
     onToggleSidebar,
     onSelectTab,

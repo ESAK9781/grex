@@ -2,8 +2,17 @@ use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+fn hidden_cmd(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 pub async fn detect_default_branch(repo_path: &Path) -> String {
-    if let Ok(out) = Command::new("git")
+    if let Ok(out) = hidden_cmd("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(repo_path)
         .output()
@@ -20,7 +29,7 @@ pub async fn detect_default_branch(repo_path: &Path) -> String {
 }
 
 pub async fn get_head_commit(repo_path: &Path, branch: &str) -> String {
-    if let Ok(out) = Command::new("git")
+    if let Ok(out) = hidden_cmd("git")
         .args(["rev-parse", "--short", branch])
         .current_dir(repo_path)
         .output()
@@ -47,7 +56,7 @@ pub async fn create_worktree(
     let worktree_path = worktrees_root.join(slug);
     let branch_name = format!("agent/{slug}");
 
-    let out = Command::new("git")
+    let out = hidden_cmd("git")
         .args([
             "worktree",
             "add",
@@ -90,21 +99,44 @@ pub fn inject_central_config(
         link_or_copy_dir(&central_skills, &target_skills)?;
     }
 
-    // Write MCP config for agent CLIs (--mcp-config)
+    // Write MCP config for agent CLIs (--mcp-config), merging Grex's embedded MCP
+    // with all enabled GitHub/custom MCPs from ~/.agent-factory/mcps.json
     let shim_bin = resolve_mcp_shim_binary();
-    let mcp_config = serde_json::json!({
-        "mcpServers": {
-            "grex": {
-                "command": shim_bin,
-                "args": [],
-                "env": {
-                    "FACTORY_MCP_PORT": mcp_port.to_string(),
-                    "FACTORY_MCP_URL": format!("http://127.0.0.1:{mcp_port}/mcp"),
-                    "AGENT_FEATURE_ID": feature_id
-                },
-                "url": format!("http://127.0.0.1:{mcp_port}/sse")
-            }
+    let mut servers_map = serde_json::Map::new();
+    servers_map.insert(
+        "grex".to_string(),
+        serde_json::json!({
+            "command": shim_bin,
+            "args": [],
+            "env": {
+                "FACTORY_MCP_PORT": mcp_port.to_string(),
+                "FACTORY_MCP_URL": format!("http://127.0.0.1:{mcp_port}/mcp"),
+                "AGENT_FEATURE_ID": feature_id
+            },
+            "url": format!("http://127.0.0.1:{mcp_port}/sse")
+        }),
+    );
+
+    for mcp in crate::mcps::load_registry(central_dir) {
+        if !mcp.enabled || mcp.id == "grex" {
+            continue;
         }
+        let mut entry = serde_json::Map::new();
+        if !mcp.command.is_empty() {
+            entry.insert("command".to_string(), serde_json::json!(mcp.command));
+            entry.insert("args".to_string(), serde_json::json!(mcp.args));
+        }
+        if let Some(url) = mcp.url {
+            entry.insert("url".to_string(), serde_json::json!(url));
+        }
+        if !mcp.env.is_empty() {
+            entry.insert("env".to_string(), serde_json::json!(mcp.env));
+        }
+        servers_map.insert(mcp.id, serde_json::Value::Object(entry));
+    }
+
+    let mcp_config = serde_json::json!({
+        "mcpServers": serde_json::Value::Object(servers_map)
     });
 
     let mcp_config_path = worktree_path.join(".grex-mcp.json");
@@ -172,7 +204,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 pub async fn get_touched_files(worktree_path: &Path, base_branch: &str) -> Vec<String> {
     let mut files = std::collections::BTreeSet::new();
 
-    if let Ok(out) = Command::new("git")
+    if let Ok(out) = hidden_cmd("git")
         .args(["status", "--porcelain"])
         .current_dir(worktree_path)
         .output()
@@ -191,7 +223,7 @@ pub async fn get_touched_files(worktree_path: &Path, base_branch: &str) -> Vec<S
     }
 
     let range = format!("{base_branch}..HEAD");
-    if let Ok(out) = Command::new("git")
+    if let Ok(out) = hidden_cmd("git")
         .args(["diff", "--name-only", &range])
         .current_dir(worktree_path)
         .output()
@@ -218,7 +250,7 @@ pub async fn approve_and_merge(
     base_branch: &str,
 ) -> Result<String> {
     // Ensure main repo is on base_branch
-    let checkout = Command::new("git")
+    let checkout = hidden_cmd("git")
         .args(["checkout", base_branch])
         .current_dir(repo_path)
         .output()
@@ -231,7 +263,7 @@ pub async fn approve_and_merge(
         ));
     }
 
-    let merge = Command::new("git")
+    let merge = hidden_cmd("git")
         .args([
             "merge",
             "--no-ff",
@@ -260,7 +292,7 @@ pub async fn remove_worktree(
     worktree_path: &Path,
     branch_name: &str,
 ) -> Result<()> {
-    let _ = Command::new("git")
+    let _ = hidden_cmd("git")
         .args([
             "worktree",
             "remove",
@@ -271,7 +303,7 @@ pub async fn remove_worktree(
         .output()
         .await;
 
-    let _ = Command::new("git")
+    let _ = hidden_cmd("git")
         .args(["branch", "-d", branch_name])
         .current_dir(repo_path)
         .output()

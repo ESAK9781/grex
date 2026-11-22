@@ -4,6 +4,7 @@ pub mod commands;
 pub mod db;
 pub mod git;
 pub mod mcp;
+pub mod mcps;
 pub mod models;
 pub mod pty;
 
@@ -91,6 +92,14 @@ pub fn run() {
             commands::read_changelog_html,
             commands::get_factory_state_cmd,
             commands::submit_sample_changelog,
+            commands::list_installed_mcps,
+            commands::install_mcp_from_github,
+            commands::add_custom_mcp,
+            commands::import_mcp_json_cmd,
+            commands::toggle_mcp_cmd,
+            commands::update_mcp_env_cmd,
+            commands::remove_mcp_cmd,
+            commands::sync_mcps_to_worktrees,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Grex Tauri application");

@@ -194,6 +194,7 @@ pub struct BootstrapState {
     pub tabs: Vec<AgentTab>,
     pub reviews: Vec<ReviewItem>,
     pub central_files: Vec<String>,
+    pub installed_mcps: Vec<crate::mcps::InstalledMcp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

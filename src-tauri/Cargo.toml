@@ -1,6 +1,6 @@
 [package]
 name = "grex"
-version = "0.1.0"
+version = "0.1.1"
 description = "Grex — Local multi-agent software factory with native PTYs, Git worktrees, embedded MCP server, and 5-subtab HTML changelog reviews"
 authors = ["Grex Contributors"]
 license = "MIT"
@@ -44,6 +44,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-stream = "0.3"
 futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tempfile = "3"
